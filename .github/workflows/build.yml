@@ -1,4 +1,4 @@
-name: Build APK
+name: Build Aria APK
 
 on:
   push:
@@ -8,33 +8,28 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev patchelf git unzip wget
-          pip install --upgrade pip setuptools wheel cython kivy buildozer==1.6.0
-        
-      - name: Prepare Project Structure
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # --- مرحله ۱: ساختار پوشه‌بندی استاندارد Kivy ---
+      - name: Setup Project Structure
         run: |
           mkdir -p src
-          cp brain.py src/main.py || echo "print('Hello')" > src/main.py
+          # اگر brain.py هست، آن را به main.py تبدیل کن (نقطه ورود اپ)
+          if [ -f "brain.py" ]; then cp brain.py src/main.py; else echo "print('Aria Running')" > src/main.py; fi
+          # فایل‌های دیگر (اگر هستند)
+          for f in *.py; do [ "$f" != "brain.py" ] && cp "$f" src/ || true; done
           
-      - name: Write Custom Spec File
+      # --- مرحله ۲: نوشتن پیکربندی Buildozer ---
+      - name: Create buildozer.spec
         run: |
           cat <<SPECFILE > buildozer.spec
           [app]
           title = Aria
           package.name = aria
-          package.domain = org.mrfokolaii
+          package.domain = com.mrfokolaii
           source.dir = ./src
-          source.include_exts = py,png,jpg,kv,atlas
+          source.include_exts = py,png,jpg,kv,atlas,json,txt
           version = 0.1
           requirements = python3,kivy,requests,pathlib2,certifi,chardet,idna,urllib3,six,setuptools,pyjnius,android
           orientation = portrait
@@ -43,34 +38,15 @@ jobs:
           android.minapi = 21
           android.ndk_api = 21
           SPECFILE
-          
-      - name: Download Android SDK Tools & Accept Licenses
-        run: |
-          # ساخت پوشه موقت برای دانلود ابزارها
-          mkdir -p /tmp/android-sdk/cmdline-tools
-          cd /tmp/android-sdk/cmdline-tools
-          
-          # دانلود آخرین نسخه tools
-          wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
-          unzip commandlinetools-linux-*.zip
-          mv cmdline-tools latest
-          
-          export ANDROID_HOME=/tmp/android-sdk
-          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin
-          
-          # پذیرش تمام لایسنس‌ها
-          yes | sdkmanager --licenses
-          
-          # نصب اجزای مورد نیاز به صورت دستی قبل از buildozer
-          sdkmanager "platform-tools" "build-tools;33.0.0" "platforms;android-33"
-          
-      - name: Build APK
-        env:
-          ANDROID_HOME: /tmp/android-sdk
-          PATH: ${{ env.PATH }}:/tmp/android-sdk/cmdline-tools/latest/bin:/tmp/android-sdk/platform-tools
-        run: |
-          buildozer android debug
-          
+
+      # --- مرحله ۳: استفاده از اکشن رسمی Kivy برای بیلد ---
+      - name: Build Android APK
+        uses: kivy/kivy-action@v1
+        with:
+          recipe: buildozer-android-debug
+          spec-file: buildozer.spec
+
+      # --- مرحله ۴: آپلود خروجی ---
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
