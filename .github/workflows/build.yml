@@ -19,7 +19,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev patchelf git
-          pip install --upgrade pip setuptools wheel cython kivy buildozer==0.45.0
+          pip install --upgrade pip setuptools wheel cython kivy buildozer==1.6.0
         
       - name: Prepare Project Structure
         run: |
