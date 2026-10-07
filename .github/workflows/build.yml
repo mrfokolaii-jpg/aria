@@ -15,10 +15,10 @@ jobs:
         with:
           python-version: '3.10'
           
-      - name: Install Dependencies
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev patchelf git
+          sudo apt-get install -y openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev patchelf git unzip wget
           pip install --upgrade pip setuptools wheel cython kivy buildozer==1.6.0
         
       - name: Prepare Project Structure
@@ -44,13 +44,30 @@ jobs:
           android.ndk_api = 21
           SPECFILE
           
-      - name: Accept Android Licenses
+      - name: Download Android SDK Tools & Accept Licenses
         run: |
-          yes | sdkmanager --licenses || true
-          mkdir -p ~/.android
-          touch ~/.android/repositories.cfg
+          # ساخت پوشه موقت برای دانلود ابزارها
+          mkdir -p /tmp/android-sdk/cmdline-tools
+          cd /tmp/android-sdk/cmdline-tools
+          
+          # دانلود آخرین نسخه tools
+          wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+          unzip commandlinetools-linux-*.zip
+          mv cmdline-tools latest
+          
+          export ANDROID_HOME=/tmp/android-sdk
+          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin
+          
+          # پذیرش تمام لایسنس‌ها
+          yes | sdkmanager --licenses
+          
+          # نصب اجزای مورد نیاز به صورت دستی قبل از buildozer
+          sdkmanager "platform-tools" "build-tools;33.0.0" "platforms;android-33"
           
       - name: Build APK
+        env:
+          ANDROID_HOME: /tmp/android-sdk
+          PATH: ${{ env.PATH }}:/tmp/android-sdk/cmdline-tools/latest/bin:/tmp/android-sdk/platform-tools
         run: |
           buildozer android debug
           
