@@ -1,7 +1,9 @@
 package com.mrfokolaii.aria
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
-import android.widget.TextView
+import android.provider.Settings
 import androidx.appcompat.app.AppCompatActivity
 
 class MainActivity : AppCompatActivity() {
@@ -9,12 +11,18 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val text = TextView(this).apply {
-            text = "ARIA\n\nبرنامه با موفقیت اجرا شد."
-            textSize = 24f
-            setPadding(48, 120, 48, 48)
+        if (!Settings.canDrawOverlays(this)) {
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+            )
+            finish()
+            return
         }
 
-        setContentView(text)
+        startService(Intent(this, AriaOverlayService::class.java))
+        finish()
     }
 }

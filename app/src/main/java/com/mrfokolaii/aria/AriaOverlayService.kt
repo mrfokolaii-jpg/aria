@@ -1,8 +1,5 @@
 package com.mrfokolaii.aria
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.graphics.Color
@@ -22,17 +19,6 @@ class AriaOverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
 
-        createNotificationChannel()
-
-        val notification = Notification.Builder(this, "aria")
-            .setContentTitle("ARIA")
-            .setContentText("آریا آماده است")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setOngoing(true)
-            .build()
-
-        startForeground(1001, notification)
-
         if (!Settings.canDrawOverlays(this)) {
             stopSelf()
             return
@@ -41,20 +27,18 @@ class AriaOverlayService : Service() {
         try {
             windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
+            val size = (68 * resources.displayMetrics.density).toInt()
+
             orb = View(this).apply {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setColor(Color.rgb(30, 144, 255))
                 }
 
-                elevation = 20f
-
                 setOnClickListener {
-                    // Voice Agent در مرحله بعد به Orb متصل می‌شود.
+                    // مرحله بعد: اتصال Orb به Agent
                 }
             }
-
-            val size = (68 * resources.displayMetrics.density).toInt()
 
             val params = WindowManager.LayoutParams(
                 size,
@@ -70,35 +54,20 @@ class AriaOverlayService : Service() {
 
             windowManager?.addView(orb, params)
 
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             orb = null
             stopSelf()
         }
     }
 
-    private fun createNotificationChannel() {
-        val manager = getSystemService(NotificationManager::class.java)
-
-        manager.createNotificationChannel(
-            NotificationChannel(
-                "aria",
-                "ARIA Agent",
-                NotificationManager.IMPORTANCE_LOW
-            )
-        )
-    }
-
     override fun onDestroy() {
         try {
-            orb?.let { view ->
-                windowManager?.removeView(view)
-            }
+            orb?.let { windowManager?.removeView(it) }
         } catch (_: Exception) {
         }
 
         orb = null
         windowManager = null
-
         super.onDestroy()
     }
 
