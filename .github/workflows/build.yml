@@ -1,4 +1,4 @@
-name: Build Aria APK
+name: Android Build
 
 on:
   push:
@@ -6,27 +6,54 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Get Date (for cache)
+        id: get-date
+        run: echo "date=$(date -u '+%Y%m%d')" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Cache Buildozer global directory
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: buildozer-global-${{ runner.os }}-${{ steps.get-date.outputs.date }}
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt update
+          sudo apt-get install -y \
+            build-essential git ffmpeg libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev \
+            libsdl2-ttf-dev libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev \
+            libunwind-dev zlib1g-dev libsqlite3-dev sqlite3 bzip2 libbz2-dev openssl \
+            libgdbm-dev libgdbm-compat-dev liblzma-dev libreadline-dev uuid-dev \
+            zip unzip autoconf libtool pkg-config libncurses5-dev libncursesw5-dev \
+            libtinfo5 cmake libffi-dev libssl-dev automake
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install System Dependencies
+      - name: Install Python Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev patchelf git unzip wget zipalign apksigner
+          pip install --upgrade pip
+          pip install buildozer cython==0.29.33
 
       - name: Prepare Project Structure
         run: |
           mkdir -p src
           if [ -f "brain.py" ]; then cp brain.py src/main.py; else echo "print('Aria Running')" > src/main.py; fi
           for f in *.py; do [ "$f" != "brain.py" ] && cp "$f" src/ || true; done
-          
+
       - name: Create buildozer.spec
         run: |
           cat <<SPECFILE > buildozer.spec
@@ -45,33 +72,13 @@ jobs:
           android.ndk_api = 21
           SPECFILE
 
-      - name: Download Android SDK & Accept Licenses
-        env:
-          ANDROID_SDK_ROOT: /opt/android-sdk
-          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+      - name: Build with Buildozer
         run: |
-          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
-          cd $ANDROID_SDK_ROOT/cmdline-tools
-          wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
-          unzip commandlinetools-linux-*.zip
-          mv cmdline-tools latest
-          export PATH=$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools
-          yes | sdkmanager --licenses
-          sdkmanager "platform-tools" "build-tools;33.0.0" "platforms;android-33"
+          yes | buildozer -v android debug
 
-      - name: Install Python Packages
-        run: pip install --upgrade pip setuptools wheel cython kivy buildozer==1.6.0
-
-      - name: Build APK
-        env:
-          ANDROID_SDK_ROOT: /opt/android-sdk
-          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
-          PATH: ${{ env.PATH }}:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools
-        run: |
-          buildozer android debug
-
-      - name: Upload Artifact
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: aria-apk
           path: bin/*.apk
+          retention-days: 7
