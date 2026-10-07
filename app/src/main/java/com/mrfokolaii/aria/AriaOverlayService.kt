@@ -508,8 +508,10 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
                     ?: "پاسخ خالی از Gemini دریافت شد."
             }
 
+        } catch (e: SecurityException) {
+            "خطای امنیتی: ${e.message ?: "دسترسی توسط Android رد شد."}"
         } catch (e: Exception) {
-            "ارتباط با هوش مصنوعی برقرار نشد: ${e.javaClass.simpleName}"
+            "ارتباط با هوش مصنوعی برقرار نشد: ${e.javaClass.simpleName}: ${e.message ?: "بدون جزئیات"}"
         }
     }
 
