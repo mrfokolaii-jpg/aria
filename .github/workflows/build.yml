@@ -42,9 +42,13 @@ jobs:
           android.api = 33
           android.minapi = 21
           android.ndk_api = 21
-          android.permission.CAMERA = 
-          android.permission.RECORD_AUDIO = 
           SPECFILE
+          
+      - name: Accept Android Licenses
+        run: |
+          yes | sdkmanager --licenses || true
+          mkdir -p ~/.android
+          touch ~/.android/repositories.cfg
           
       - name: Build APK
         run: |
