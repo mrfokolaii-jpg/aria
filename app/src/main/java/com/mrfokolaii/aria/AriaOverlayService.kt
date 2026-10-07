@@ -21,7 +21,6 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import androidx.core.content.ContextCompat
-import java.util.Locale
 
 class AriaOverlayService : Service() {
 
@@ -90,11 +89,10 @@ class AriaOverlayService : Service() {
                         }
 
                         MotionEvent.ACTION_UP -> {
-                            val distance =
-                                kotlin.math.hypot(
-                                    event.rawX - downX,
-                                    event.rawY - downY
-                                )
+                            val distance = kotlin.math.hypot(
+                                event.rawX - downX,
+                                event.rawY - downY
+                            )
 
                             if (distance < 20f) {
                                 toggleListening()
@@ -157,74 +155,93 @@ class AriaOverlayService : Service() {
         if (speechRecognizer == null) {
             speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
 
-            speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+            speechRecognizer?.setRecognitionListener(
+                object : RecognitionListener {
 
-                override fun onReadyForSpeech(params: Bundle?) {
-                    listening = true
-                    updateNotification("🎤 گوش می‌دهم — فارسی")
-                }
-
-                override fun onBeginningOfSpeech() {
-                    updateNotification("🎤 در حال شنیدن...")
-                }
-
-                override fun onRmsChanged(rmsdB: Float) = Unit
-
-                override fun onBufferReceived(buffer: ByteArray?) = Unit
-
-                override fun onEndOfSpeech() {
-                    listening = false
-                    updateNotification("در حال پردازش...")
-                }
-
-                override fun onError(error: Int) {
-                    listening = false
-                    updateNotification("خطای تشخیص گفتار: $error")
-                }
-
-                override fun onResults(results: Bundle?) {
-                    listening = false
-
-                    val matches =
-                        results?.getStringArrayList(
-                            SpeechRecognizer.RESULTS_RECOGNITION
-                        )
-
-                    val text = matches?.firstOrNull()
-
-                    if (!text.isNullOrBlank()) {
-                        updateNotification("شنیدم: $text")
-                    } else {
-                        updateNotification("چیزی تشخیص داده نشد")
+                    override fun onReadyForSpeech(params: Bundle?) {
+                        listening = true
+                        updateNotification("🎤 گوش می‌دهم — فارسی")
                     }
-                }
 
-                override fun onPartialResults(partialResults: Bundle?) {
-                    val matches =
-                        partialResults?.getStringArrayList(
-                            SpeechRecognizer.RESULTS_RECOGNITION
-                        )
-
-                    val text = matches?.firstOrNull()
-
-                    if (!text.isNullOrBlank()) {
-                        updateNotification("🎤 $text")
+                    override fun onBeginningOfSpeech() {
+                        updateNotification("🎤 در حال شنیدن...")
                     }
-                }
 
-                override fun onEvent(eventType: Int, params: Bundle?) = Unit
-            })
+                    override fun onRmsChanged(rmsdB: Float) = Unit
+
+                    override fun onBufferReceived(buffer: ByteArray?) = Unit
+
+                    override fun onEndOfSpeech() {
+                        listening = false
+                        updateNotification("در حال پردازش...")
+                    }
+
+                    override fun onError(error: Int) {
+                        listening = false
+                        updateNotification("خطای تشخیص گفتار: $error")
+                    }
+
+                    override fun onResults(results: Bundle?) {
+                        listening = false
+
+                        val matches =
+                            results?.getStringArrayList(
+                                SpeechRecognizer.RESULTS_RECOGNITION
+                            )
+
+                        val text = matches?.firstOrNull()
+
+                        if (!text.isNullOrBlank()) {
+                            updateNotification("شنیدم: $text")
+                        } else {
+                            updateNotification("چیزی تشخیص داده نشد")
+                        }
+                    }
+
+                    override fun onPartialResults(partialResults: Bundle?) {
+                        val matches =
+                            partialResults?.getStringArrayList(
+                                SpeechRecognizer.RESULTS_RECOGNITION
+                            )
+
+                        val text = matches?.firstOrNull()
+
+                        if (!text.isNullOrBlank()) {
+                            updateNotification("🎤 $text")
+                        }
+                    }
+
+                    override fun onEvent(
+                        eventType: Int,
+                        params: Bundle?
+                    ) = Unit
+                }
+            )
         }
 
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        val intent = Intent(
+            RecognizerIntent.ACTION_RECOGNIZE_SPEECH
+        ).apply {
             putExtra(
                 RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
             )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "fa-IR")
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "fa-IR")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE,
+                "fa-IR"
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE,
+                "fa-IR"
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_PARTIAL_RESULTS,
+                true
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_MAX_RESULTS,
+                3
+            )
         }
 
         try {
@@ -233,7 +250,9 @@ class AriaOverlayService : Service() {
             updateNotification("🎤 آماده شنیدن فارسی...")
         } catch (e: Exception) {
             listening = false
-            updateNotification("خطا: ${e.javaClass.simpleName}")
+            updateNotification(
+                "خطا: ${e.javaClass.simpleName}"
+            )
         }
     }
 
@@ -248,9 +267,13 @@ class AriaOverlayService : Service() {
     }
 
     private fun updateNotification(text: String) {
-        val manager = getSystemService(NotificationManager::class.java)
+        val manager =
+            getSystemService(NotificationManager::class.java)
 
-        val notification = Notification.Builder(this, CHANNEL_ID)
+        val notification = Notification.Builder(
+            this,
+            CHANNEL_ID
+        )
             .setContentTitle("ARIA")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
@@ -261,7 +284,8 @@ class AriaOverlayService : Service() {
     }
 
     private fun createNotificationChannel() {
-        val manager = getSystemService(NotificationManager::class.java)
+        val manager =
+            getSystemService(NotificationManager::class.java)
 
         manager.createNotificationChannel(
             NotificationChannel(
@@ -282,18 +306,15 @@ class AriaOverlayService : Service() {
         listening = false
 
         try {
-            orb?.let { windowManager?.removeView(it) }
+            orb?.let {
+                windowManager?.removeView(it)
+            }
         } catch (_: Exception) {
         }
 
         orb = null
         params = null
         windowManager = null
-
-        super
-cd ~/aria
-
-cat >> app/src/main/java/com/mrfokolaii/aria/AriaOverlayService.kt <<'EOF'
 
         super.onDestroy()
     }
