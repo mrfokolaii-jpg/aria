@@ -11,16 +11,22 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # --- مرحله ۱: ساختار پوشه‌بندی استاندارد Kivy ---
-      - name: Setup Project Structure
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev patchelf git unzip wget zipalign apksigner
+
+      - name: Prepare Project Structure
         run: |
           mkdir -p src
-          # اگر brain.py هست، آن را به main.py تبدیل کن (نقطه ورود اپ)
           if [ -f "brain.py" ]; then cp brain.py src/main.py; else echo "print('Aria Running')" > src/main.py; fi
-          # فایل‌های دیگر (اگر هستند)
           for f in *.py; do [ "$f" != "brain.py" ] && cp "$f" src/ || true; done
           
-      # --- مرحله ۲: نوشتن پیکربندی Buildozer ---
       - name: Create buildozer.spec
         run: |
           cat <<SPECFILE > buildozer.spec
@@ -39,14 +45,31 @@ jobs:
           android.ndk_api = 21
           SPECFILE
 
-      # --- مرحله ۳: استفاده از اکشن رسمی Kivy برای بیلد ---
-      - name: Build Android APK
-        uses: kivy/kivy-action@v1
-        with:
-          recipe: buildozer-android-debug
-          spec-file: buildozer.spec
+      - name: Download Android SDK & Accept Licenses
+        env:
+          ANDROID_SDK_ROOT: /opt/android-sdk
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+        run: |
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          cd $ANDROID_SDK_ROOT/cmdline-tools
+          wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+          unzip commandlinetools-linux-*.zip
+          mv cmdline-tools latest
+          export PATH=$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "build-tools;33.0.0" "platforms;android-33"
 
-      # --- مرحله ۴: آپلود خروجی ---
+      - name: Install Python Packages
+        run: pip install --upgrade pip setuptools wheel cython kivy buildozer==1.6.0
+
+      - name: Build APK
+        env:
+          ANDROID_SDK_ROOT: /opt/android-sdk
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+          PATH: ${{ env.PATH }}:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools
+        run: |
+          buildozer android debug
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
