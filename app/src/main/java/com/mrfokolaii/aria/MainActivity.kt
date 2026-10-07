@@ -15,8 +15,10 @@ class MainActivity : AppCompatActivity() {
     private val microphonePermission =
         registerForActivityResult(
             ActivityResultContracts.RequestPermission()
-        ) {
-            startAria()
+        ) { granted ->
+            if (granted) {
+                startAria()
+            }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -29,7 +31,6 @@ class MainActivity : AppCompatActivity() {
                     Uri.parse("package:$packageName")
                 )
             )
-            finish()
             return
         }
 
@@ -40,9 +41,10 @@ class MainActivity : AppCompatActivity() {
             ) != PackageManager.PERMISSION_GRANTED
         ) {
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
-        } else {
-            startAria()
+            return
         }
+
+        startAria()
     }
 
     private fun startAria() {
