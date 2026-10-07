@@ -97,7 +97,7 @@ class MainActivity : AppCompatActivity() {
         keyInput = EditText(this).apply {
             hint = "Gemini API Key"
             textSize = 16f
-            singleLine = true
+            setSingleLine(true)
             inputType = 0x00000081
         }
 
