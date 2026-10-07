@@ -29,10 +29,9 @@ jobs:
       - name: Configure Buildozer
         run: |
           buildozer init
-          sed -i 's/title = MyApplication/title = Aria/' buildozer.spec
-          sed -i 's/package.name = org.kivy.androidapp/package.name = com.mrfokolaii.aria/' buildozer.spec
-          sed -i 's/source.directory = .\/source/source.directory = ./src/' buildozer.spec
-          # اضافه کردن کتابخانه‌های مورد نیاز به requirements
+          sed -i 's|title = MyApplication|title = Aria|' buildozer.spec
+          sed -i 's|package.name = org.kivy.androidapp|package.name = com.mrfokolaii.aria|' buildozer.spec
+          sed -i 's|source.directory = ./source|source.directory = ./src|' buildozer.spec
           sed -i '/^requirements = /c\requirements = python3,kivy,pillow,requests,pathlib2,certifi,chardet,idna,urllib3,six,setuptools,pyjnius,android' buildozer.spec
           
       - name: Build APK
