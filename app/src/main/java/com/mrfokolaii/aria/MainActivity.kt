@@ -6,36 +6,231 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.text.InputType
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.mrfokolaii.aria.agent.ApiConnectionTester
 
 class MainActivity : AppCompatActivity() {
-
-    private lateinit var keyInput: EditText
+    private lateinit var unoKey: EditText
+    private lateinit var customUrl: EditText
+    private lateinit var customKey: EditText
+    private lateinit var customModel: EditText
+    private lateinit var statusText: TextView
+    private lateinit var widgetSwitch: Switch
 
     private val micPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) startAria()
-        else status("دسترسی میکروفون لازم است.")
-    }
-
-    private val phonePermission = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        startAria()
+        else showStatus("برای مکالمهٔ صوتی، دسترسی میکروفون لازم است.")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        showSetup()
+    }
 
+    private fun showSetup() {
+        val prefs = getSharedPreferences("aria", MODE_PRIVATE)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 28, 32, 32)
+        }
+        val scroll = ScrollView(this)
+        scroll.addView(root)
+
+        fun label(text: String) {
+            root.addView(TextView(this).apply {
+                this.text = text
+                textSize = 16f
+                setPadding(0, 16, 0, 6)
+            })
+        }
+
+        fun field(hintText: String, value: String, secret: Boolean = false): EditText {
+            return EditText(this).apply {
+                hint = hintText
+                setSingleLine(true)
+                textSize = 15f
+                if (secret) inputType = InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_VARIATION_PASSWORD
+                setText(value)
+                root.addView(
+                    this,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+            }
+        }
+
+        fun button(text: String, action: () -> Unit) {
+            root.addView(Button(this).apply {
+                this.text = text
+                setOnClickListener { action() }
+            })
+        }
+
+        root.addView(TextView(this).apply {
+            text = "🤖 ARIA\nتنظیمات اتصال و ویجت شناور"
+            textSize = 23f
+        })
+
+        label("۱. UnoRouter — فقط کلید API")
+        unoKey = field(
+            "UnoRouter API Key",
+            prefs.getString("unorouter_api_key", "") ?: "",
+            true
+        )
+        button("تست اتصال UnoRouter") { testProvider("unorouter") }
+        label("وضعیت UnoRouter: ${providerStatus(prefs.getBoolean("unorouter_test_ok", false))}")
+
+        root.addView(TextView(this).apply {
+            text = "۲. اتصال دستی API"
+            textSize = 18f
+            setPadding(0, 20, 0, 6)
+        })
+        customUrl = field(
+            "آدرس API؛ پایه یا /v1/chat/completions",
+            prefs.getString("custom_api_url", "") ?: ""
+        )
+        customKey = field(
+            "کلید API",
+            prefs.getString("custom_api_key", "") ?: "",
+            true
+        )
+        customModel = field(
+            "نام مدل، مثال: claude-opus-4.7",
+            prefs.getString("custom_model", "") ?: ""
+        )
+        button("تست اتصال دستی") { testProvider("custom") }
+        label("وضعیت اتصال دستی: ${providerStatus(prefs.getBoolean("custom_test_ok", false))}")
+
+        label("۳. ویجت شناور")
+        widgetSwitch = Switch(this).apply {
+            text = "فعال بودن ویجت روی برنامه‌های دیگر"
+            isChecked = prefs.getBoolean("floating_widget_enabled", true)
+            setOnCheckedChangeListener { _, enabled ->
+                saveFields()
+                getSharedPreferences("aria", MODE_PRIVATE).edit()
+                    .putBoolean("floating_widget_enabled", enabled)
+                    .apply()
+                if (enabled) ensureRunPermissions()
+                else {
+                    stopService(Intent(this@MainActivity, AriaOverlayService::class.java))
+                    showStatus("ویجت شناور خاموش شد؛ تنظیمات و تاریخچه حفظ شدند.")
+                }
+            }
+        }
+        root.addView(widgetSwitch)
+
+        button("ذخیره تنظیمات") {
+            saveFields()
+            showStatus("تنظیمات ذخیره شد؛ وضعیت اتصال فقط پس از تست موفق فعال می‌شود.")
+        }
+
+        button("ذخیره و اجرای آریا") {
+            saveFields()
+            getSharedPreferences("aria", MODE_PRIVATE).edit()
+                .putBoolean("floating_widget_enabled", true)
+                .apply()
+            widgetSwitch.isChecked = true
+            ensureRunPermissions()
+        }
+
+        statusText = TextView(this).apply {
+            textSize = 14f
+            setPadding(0, 16, 0, 8)
+        }
+        root.addView(statusText)
+        showStatus("کلیدها و تاریخچهٔ قبلی پاک نمی‌شوند.")
+        setContentView(scroll)
+    }
+
+    private fun providerStatus(ok: Boolean) =
+        if (ok) "فعال (آخرین تست موفق)" else "غیرفعال یا هنوز تست نشده"
+
+    private fun saveFields() {
+        val prefs = getSharedPreferences("aria", MODE_PRIVATE)
+        val oldUno = prefs.getString("unorouter_api_key", "") ?: ""
+        val oldUrl = prefs.getString("custom_api_url", "") ?: ""
+        val oldCustomKey = prefs.getString("custom_api_key", "") ?: ""
+        val oldModel = prefs.getString("custom_model", "") ?: ""
+
+        val newUno = unoKey.text.toString().trim()
+        val newUrl = customUrl.text.toString().trim()
+        val newCustomKey = customKey.text.toString().trim()
+        val newModel = customModel.text.toString().trim()
+
+        prefs.edit()
+            .putString("unorouter_api_key", newUno)
+            .putString("custom_api_url", newUrl)
+            .putString("custom_api_key", newCustomKey)
+            .putString("custom_model", newModel)
+            .apply()
+
+        val edit = prefs.edit()
+        if (oldUno != newUno) edit.putBoolean("unorouter_test_ok", false)
+        if (oldUrl != newUrl || oldCustomKey != newCustomKey || oldModel != newModel) {
+            edit.putBoolean("custom_test_ok", false)
+        }
+        edit.apply()
+    }
+
+    private fun testProvider(which: String) {
+        saveFields()
+        val prefs = getSharedPreferences("aria", MODE_PRIVATE)
+        val isUno = which == "unorouter"
+        val key = if (isUno) unoKey.text.toString().trim()
+            else customKey.text.toString().trim()
+        val url = if (isUno) "https://api.unorouter.com/v1"
+            else customUrl.text.toString().trim()
+        val model = if (isUno) "" else customModel.text.toString().trim()
+
+        showStatus("در حال تست واقعی اتصال...")
+        Thread {
+            val result = if (isUno) {
+                ApiConnectionTester.testUnoRouter(key, url)
+            } else {
+                ApiConnectionTester.test(key, url, model)
+            }
+            runOnUiThread {
+                prefs.edit()
+                    .putBoolean(if (isUno) "unorouter_test_ok" else "custom_test_ok", result.success)
+                    .apply()
+
+                if (result.success) {
+                    if (isUno && !result.selectedModel.isNullOrBlank()) {
+                        prefs.edit()
+                            .putString("unorouter_model", result.selectedModel)
+                            .apply()
+                    }
+                    prefs.edit().putString("active_provider", which).apply()
+                } else if (prefs.getString("active_provider", "") == which) {
+                    prefs.edit().putString("active_provider", "none").apply()
+                }
+
+                showStatus(
+                    (if (isUno) "UnoRouter: " else "اتصال دستی: ") + result.message
+                )
+            }
+        }.start()
+    }
+
+    private fun ensureRunPermissions() {
         if (!Settings.canDrawOverlays(this)) {
-            showSetup("ابتدا دسترسی نمایش روی برنامه‌های دیگر را فعال کن.")
+            showStatus("برای ویجت، مجوز نمایش روی برنامه‌های دیگر را فعال کن.")
             startActivity(
                 Intent(
                     Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -45,141 +240,35 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) != PackageManager.PERMISSION_GRANTED
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
         ) {
             micPermission.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
 
-        showSetup()
-    }
-
-    override fun onResume() {
-        super.onResume()
-
-        if (!Settings.canDrawOverlays(this)) return
-
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            if (!isFinishing) {
-                micPermission.launch(Manifest.permission.RECORD_AUDIO)
-            }
-            return
-        }
-
-        if (::keyInput.isInitialized) {
-            keyInput.setText(
-                getSharedPreferences("aria", MODE_PRIVATE)
-                    .getString("gemini_key", "")
-            )
-        }
-    }
-
-    private fun showSetup(message: String = "آریا آماده است.") {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(40, 70, 40, 40)
-        }
-
-        val title = TextView(this).apply {
-            text = "🤖 ARIA\n\n$message"
-            textSize = 24f
-        }
-
-        keyInput = EditText(this).apply {
-            hint = "Gemini API Key"
-            textSize = 16f
-            setSingleLine(true)
-            inputType = 0x00000081
-        }
-
-        val save = Button(this).apply {
-            text = "ذخیره و اجرای آریا"
-            setOnClickListener {
-                val key = keyInput.text.toString().trim()
-
-                if (key.isNotEmpty()) {
-                    getSharedPreferences("aria", MODE_PRIVATE)
-                        .edit()
-                        .putString("gemini_key", key)
-                        .apply()
-                }
-
-                requestExtraPermissions()
-            }
-        }
-
-        val info = TextView(this).apply {
-            text = "\nکلید فقط روی همین گوشی ذخیره می‌شود و داخل GitHub قرار نمی‌گیرد.\n\nبعد از اجرا، دایره آبی را لمس کن و فارسی صحبت کن."
-            textSize = 15f
-        }
-
-        root.addView(title)
-        root.addView(keyInput)
-        root.addView(save)
-        root.addView(info)
-
-        setContentView(root)
-    }
-
-    private fun requestExtraPermissions() {
-        val permissions = mutableListOf<String>()
-
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CALL_PHONE
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            permissions.add(Manifest.permission.CALL_PHONE)
-        }
-
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.SEND_SMS
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            permissions.add(Manifest.permission.SEND_SMS)
-        }
-
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            permissions.add(Manifest.permission.CAMERA)
-        }
-
-        if (permissions.isNotEmpty()) {
-            phonePermission.launch(permissions.toTypedArray())
-        } else {
-            startAria()
-        }
+        startAria()
     }
 
     private fun startAria() {
+        val prefs = getSharedPreferences("aria", MODE_PRIVATE)
+        if (!prefs.getBoolean("floating_widget_enabled", true)) {
+            showStatus("ویجت خاموش است.")
+            return
+        }
         try {
             ContextCompat.startForegroundService(
                 this,
                 Intent(this, AriaOverlayService::class.java)
             )
-            finish()
+            showStatus("درخواست اجرای آریا ارسال شد.")
         } catch (e: Exception) {
-            status("خطای اجرای ARIA: ${e.javaClass.simpleName}")
+            showStatus("خطای اجرای آریا: ${e.javaClass.simpleName}")
         }
     }
 
-    private fun status(text: String) {
-        showSetup(text)
+    private fun showStatus(text: String) {
+        if (::statusText.isInitialized) statusText.text = text
+        else Toast.makeText(this, text, Toast.LENGTH_LONG).show()
     }
 }

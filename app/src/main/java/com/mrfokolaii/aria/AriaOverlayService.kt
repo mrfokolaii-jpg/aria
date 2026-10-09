@@ -24,6 +24,12 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import com.mrfokolaii.aria.agent.AgentBridge
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -62,6 +68,9 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
 
     private val history = mutableListOf<Pair<String, String>>()
 
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var agentBridge: AgentBridge? = null
+
     override fun onCreate() {
         super.onCreate()
 
@@ -78,6 +87,35 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         }
 
         tts = TextToSpeech(this, this)
+
+        val prefs = getSharedPreferences("aria", MODE_PRIVATE)
+        if (!prefs.getBoolean("floating_widget_enabled", true)) {
+            stopSelf()
+            return
+        }
+
+        val provider = prefs.getString("active_provider", "none") ?: "none"
+        val isUno = provider == "unorouter"
+        val key = prefs.getString(
+            if (isUno) "unorouter_api_key" else "custom_api_key", ""
+        )?.trim().orEmpty()
+        val endpoint = if (isUno) "https://api.unorouter.com/v1"
+            else prefs.getString("custom_api_url", "")?.trim().orEmpty()
+        val model = if (isUno) prefs.getString("unorouter_model", "")?.trim().orEmpty()
+            else prefs.getString("custom_model", "")?.trim().orEmpty()
+        val tested = prefs.getBoolean(
+            if (isUno) "unorouter_test_ok" else "custom_test_ok", false
+        )
+
+        if (provider != "none" && tested && key.isNotEmpty() &&
+            endpoint.isNotBlank() && model.isNotBlank()
+        ) {
+            agentBridge = AgentBridge(this, key, endpoint, model)
+            AriaAccessibilityService.instance?.let { accessibilityService ->
+                agentBridge?.setAccessibilityService(accessibilityService)
+            }
+        }
+
         createOrb()
     }
 
@@ -319,6 +357,15 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         if (processing) return
 
         if (
+            text.contains("استپ", ignoreCase = true) ||
+            text.contains("stop", ignoreCase = true)
+        ) {
+            tts?.stop()
+            showText("⏸")
+            return
+        }
+
+        if (
             text.contains("خداحافظ") ||
             text.contains("خاموش شو") ||
             text.contains("بسه") ||
@@ -326,6 +373,7 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         ) {
             liveMode = false
             stopListening()
+            tts?.stop()
             speak("فعلاً رفیق.")
             showText("●")
             return
@@ -334,11 +382,11 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         processing = true
         updateNotification("🧠 آریا در حال فکر کردن...")
 
-        Thread {
+        serviceScope.launch(Dispatchers.IO) {
             val reply = handleCommand(text)
-                ?: askGemini(text)
+                ?: processWithAgent(text)
 
-            android.os.Handler(Looper.getMainLooper()).post {
+            launch(Dispatchers.Main) {
                 processing = false
 
                 history.add("user" to text)
@@ -364,7 +412,7 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
                         }, 700)
                 }
             }
-        }.start()
+        }
     }
 
     private fun handleCommand(text: String): String? {
@@ -402,116 +450,22 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         return null
     }
 
-    private fun askGemini(text: String): String {
-        val prefs = getSharedPreferences("aria", MODE_PRIVATE)
-
-        val key = prefs
-            .getString("gemini_key", "")
-            ?.trim()
-            .orEmpty()
-
-        if (key.isEmpty()) {
-            return "رفیق، هنوز کلید Gemini را وارد نکردی. از صفحه ARIA واردش کن."
-        }
-
-        val model = "gemini-3.6-flash"
-
-        val url =
-            "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key"
-
-        val root = JSONObject()
-
-        val contents = JSONArray()
-
-        val system = JSONObject()
-            .put(
-                "parts",
-                JSONArray()
-                    .put(
-                        JSONObject().put(
-                            "text",
-                            "تو آریا هستی؛ دستیار صوتی فارسی کاربر. " +
-                                "صمیمی، کوتاه، دقیق و محاوره‌ای جواب بده."
-                        )
-                    )
-            )
-
-        contents.put(system)
-
-        for ((role, value) in history.takeLast(8)) {
-            contents.put(
-                JSONObject()
-                    .put("role", role)
-                    .put(
-                        "parts",
-                        JSONArray().put(
-                            JSONObject().put(
-                                "text",
-                                value
-                            )
-                        )
-                    )
-            )
-        }
-
-        contents.put(
-            JSONObject()
-                .put(
-                    "role",
-                    "user"
-                )
-                .put(
-                    "parts",
-                    JSONArray().put(
-                        JSONObject().put(
-                            "text",
-                            text
-                        )
-                    )
-                )
-        )
-
-        root.put("contents", contents)
-
-        return try {
-            val body = root
-                .toString()
-                .toRequestBody(
-                    "application/json".toMediaType()
-                )
-
-            val request = Request.Builder()
-                .url(url)
-                .post(body)
-                .build()
-
-            client.newCall(request).execute().use { response ->
-
-                if (!response.isSuccessful) {
-                    return "اتصال به Gemini خطا داد: ${response.code}"
-                }
-
-                val raw = response.body
-                    ?.string()
-                    .orEmpty()
-
-                val json = JSONObject(raw)
-
-                json.optJSONArray("candidates")
-                    ?.optJSONObject(0)
-                    ?.optJSONObject("content")
-                    ?.optJSONArray("parts")
-                    ?.optJSONObject(0)
-                    ?.optString("text")
-                    ?.trim()
-                    ?.takeIf { it.isNotEmpty() }
-                    ?: "پاسخ خالی از Gemini دریافت شد."
+    private suspend fun processWithAgent(text: String): String {
+        val bridge = agentBridge
+        if (bridge != null) {
+            try {
+                val response = bridge.processWithAgentTools(text, history)
+                return response.text
+            } catch (e: Exception) {
+                android.util.Log.e("AriaService", "AgentBridge error", e)
             }
-
-        } catch (e: SecurityException) {
-            "خطای امنیتی: ${e.message ?: "دسترسی توسط Android رد شد."}"
-        } catch (e: Exception) {
-            "ارتباط با هوش مصنوعی برقرار نشد: ${e.javaClass.simpleName}: ${e.message ?: "بدون جزئیات"}"
+        }
+        val prefs = getSharedPreferences("aria", MODE_PRIVATE)
+        val provider = prefs.getString("active_provider", "none") ?: "none"
+        return if (provider == "none") {
+            "ابتدا در تنظیمات آریا یکی از اتصال‌ها را تست کن تا فعال شود."
+        } else {
+            "اتصال فعال نیست یا تست اتصال ناموفق بوده است. تنظیمات API را بررسی کن."
         }
     }
 
@@ -638,6 +592,9 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
     override fun onDestroy() {
         liveMode = false
         stopListening()
+
+        serviceScope.cancel()
+        agentBridge = null
 
         try {
             speechRecognizer?.destroy()

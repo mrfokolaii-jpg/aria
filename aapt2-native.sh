@@ -1,0 +1,2 @@
+#!/bin/bash
+exec /opt/android-sdk/build-tools/36.0.0/aapt2 "$@"

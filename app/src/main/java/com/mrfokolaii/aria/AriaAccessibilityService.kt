@@ -10,6 +10,15 @@ class AriaAccessibilityService : AccessibilityService() {
         @Volatile
         var lastPageText: String = ""
             private set
+
+        @Volatile
+        var instance: AriaAccessibilityService? = null
+            private set
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -51,5 +60,10 @@ class AriaAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+    }
+
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        instance = null
+        return super.onUnbind(intent)
     }
 }

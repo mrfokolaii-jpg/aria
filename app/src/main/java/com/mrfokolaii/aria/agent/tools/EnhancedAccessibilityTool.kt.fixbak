@@ -1,0 +1,374 @@
+package com.mrfokolaii.aria.agent.tools
+
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
+import android.graphics.Rect
+import android.os.Bundle
+import android.util.Log
+import android.view.accessibility.AccessibilityNodeInfo
+import com.mrfokolaii.aria.AriaAccessibilityService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import kotlin.coroutines.resume
+
+/**
+ * Enhanced Accessibility Tool with full UI control capabilities
+ */
+class EnhancedAccessibilityTool : AgentTool {
+    override val name = "accessibility_control"
+    override val description = "Read screen content and interact with UI elements"
+    override val category = ToolCategory.ANDROID_SYSTEM
+
+    private var service: AccessibilityService? = null
+
+    fun setService(service: AccessibilityService?) {
+        this.service = service
+    }
+
+    override suspend fun execute(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
+        val action = params["action"]?.toString() ?: "read"
+
+        try {
+            when (action) {
+                "read" -> readScreen()
+                "click" -> clickElement(params)
+                "type" -> typeText(params)
+                "scroll" -> scrollScreen(params)
+                "back" -> performBack()
+                "home" -> performHome()
+                "recents" -> performRecents()
+                "long_click" -> longClickElement(params)
+                "find" -> findElements(params)
+                else -> ToolResult(false, null, "Unknown action: $action")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Accessibility action failed", e)
+            ToolResult(false, null, "Accessibility action failed: ${e.message}")
+        }
+    }
+
+    private fun readScreen(): ToolResult {
+        val svc = service
+        if (svc == null) {
+            return ToolResult(false, null, "Accessibility service not available")
+        }
+
+        val root = svc.rootInActiveWindow
+            ?: return ToolResult(false, null, "No active window")
+
+        val elements = mutableListOf<Map<String, Any>>()
+        val textContent = StringBuilder()
+
+        extractNodeInfo(root, elements, textContent, 0)
+
+        return ToolResult(
+            success = true,
+            data = mapOf(
+                "text_content" to textContent.toString().trim(),
+                "elements" to elements.take(50),
+                "total_elements" to elements.size
+            )
+        )
+    }
+
+    private fun extractNodeInfo(
+        node: AccessibilityNodeInfo?,
+        elements: MutableList<Map<String, Any>>,
+        textContent: StringBuilder,
+        depth: Int
+    ) {
+        if (node == null || depth > 10) return
+
+        val text = node.text?.toString()
+        val desc = node.contentDescription?.toString()
+        val className = node.className?.toString() ?: ""
+
+        if (!text.isNullOrBlank() || !desc.isNullOrBlank()) {
+            val element = mutableMapOf<String, Any>(
+                "class" to className,
+                "clickable" to node.isClickable,
+                "focusable" to node.isFocusable,
+                "editable" to node.isEditable,
+                "scrollable" to node.isScrollable
+            )
+
+            if (!text.isNullOrBlank()) {
+                element["text"] = text
+                textContent.append(text).append("\n")
+            }
+
+            if (!desc.isNullOrBlank() && desc != text) {
+                element["description"] = desc
+                textContent.append(desc).append("\n")
+            }
+
+            if (node.isClickable || node.isEditable || node.isCheckable) {
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+                element["bounds"] = mapOf(
+                    "left" to bounds.left,
+                    "top" to bounds.top,
+                    "right" to bounds.right,
+                    "bottom" to bounds.bottom
+                )
+            }
+
+            elements.add(element)
+        }
+
+        for (i in 0 until node.childCount) {
+            extractNodeInfo(node.getChild(i), elements, textContent, depth + 1)
+        }
+    }
+
+    private suspend fun clickElement(params: Map<String, Any>): ToolResult {
+        val svc = service ?: return ToolResult(false, null, "Service not available")
+
+        val text = params["text"]?.toString()
+        val description = params["description"]?.toString()
+        val className = params["class"]?.toString()
+
+        val root = svc.rootInActiveWindow
+            ?: return ToolResult(false, null, "No active window")
+
+        val node = findNode(root, text, description, className)
+            ?: return ToolResult(false, null, "Element not found")
+
+        val clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        node.recycle()
+
+        return ToolResult(
+            success = clicked,
+            data = mapOf("clicked" to clicked)
+        )
+    }
+
+    private suspend fun longClickElement(params: Map<String, Any>): ToolResult {
+        val svc = service ?: return ToolResult(false, null, "Service not available")
+
+        val text = params["text"]?.toString()
+        val description = params["description"]?.toString()
+
+        val root = svc.rootInActiveWindow
+            ?: return ToolResult(false, null, "No active window")
+
+        val node = findNode(root, text, description, null)
+            ?: return ToolResult(false, null, "Element not found")
+
+        val clicked = node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+        node.recycle()
+
+        return ToolResult(
+            success = clicked,
+            data = mapOf("long_clicked" to clicked)
+        )
+    }
+
+    private suspend fun typeText(params: Map<String, Any>): ToolResult {
+        val svc = service ?: return ToolResult(false, null, "Service not available")
+
+        val text = params["text"]?.toString()
+            ?: return ToolResult(false, null, "Text parameter required")
+
+        val targetField = params["target"]?.toString()
+
+        val root = svc.rootInActiveWindow
+            ?: return ToolResult(false, null, "No active window")
+
+        val node = if (targetField != null) {
+            findNode(root, targetField, null, "android.widget.EditText")
+        } else {
+            findEditableNode(root)
+        } ?: return ToolResult(false, null, "No editable field found")
+
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+
+        val args = Bundle()
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        val typed = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        node.recycle()
+
+        return ToolResult(
+            success = typed,
+            data = mapOf("typed" to typed, "text" to text)
+        )
+    }
+
+    private suspend fun scrollScreen(params: Map<String, Any>): ToolResult {
+        val svc = service ?: return ToolResult(false, null, "Service not available")
+
+        val direction = params["direction"]?.toString() ?: "down"
+
+        val root = svc.rootInActiveWindow
+            ?: return ToolResult(false, null, "No active window")
+
+        val scrollable = findScrollableNode(root)
+            ?: return ToolResult(false, null, "No scrollable element found")
+
+        val action = when (direction.lowercase()) {
+            "up" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+            "down" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            else -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        }
+
+        val scrolled = scrollable.performAction(action)
+        scrollable.recycle()
+
+        return ToolResult(
+            success = scrolled,
+            data = mapOf("scrolled" to scrolled, "direction" to direction)
+        )
+    }
+
+    private fun performBack(): ToolResult {
+        val svc = service ?: return ToolResult(false, null, "Service not available")
+        val result = svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        return ToolResult(success = result, data = mapOf("action" to "back"))
+    }
+
+    private fun performHome(): ToolResult {
+        val svc = service ?: return ToolResult(false, null, "Service not available")
+        val result = svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+        return ToolResult(success = result, data = mapOf("action" to "home"))
+    }
+
+    private fun performRecents(): ToolResult {
+        val svc = service ?: return ToolResult(false, null, "Service not available")
+        val result = svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS)
+        return ToolResult(success = result, data = mapOf("action" to "recents"))
+    }
+
+    private fun findElements(params: Map<String, Any>): ToolResult {
+        val svc = service ?: return ToolResult(false, null, "Service not available")
+
+        val query = params["query"]?.toString()
+            ?: return ToolResult(false, null, "Query parameter required")
+
+        val root = svc.rootInActiveWindow
+            ?: return ToolResult(false, null, "No active window")
+
+        val matches = mutableListOf<Map<String, Any>>()
+        searchNodes(root, query.lowercase(), matches)
+
+        return ToolResult(
+            success = true,
+            data = mapOf(
+                "matches" to matches,
+                "count" to matches.size
+            )
+        )
+    }
+
+    private fun searchNodes(
+        node: AccessibilityNodeInfo?,
+        query: String,
+        matches: MutableList<Map<String, Any>>
+    ) {
+        if (node == null || matches.size >= 20) return
+
+        val text = node.text?.toString()?.lowercase() ?: ""
+        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+
+        if (text.contains(query) || desc.contains(query)) {
+            matches.add(mapOf(
+                "text" to (node.text?.toString() ?: ""),
+                "description" to (node.contentDescription?.toString() ?: ""),
+                "class" to (node.className?.toString() ?: ""),
+                "clickable" to node.isClickable,
+                "editable" to node.isEditable
+            ))
+        }
+
+        for (i in 0 until node.childCount) {
+            searchNodes(node.getChild(i), query, matches)
+        }
+    }
+
+    private fun findNode(
+        root: AccessibilityNodeInfo,
+        text: String?,
+        description: String?,
+        className: String?
+    ): AccessibilityNodeInfo? {
+        if (text != null && root.text?.toString()?.contains(text, ignoreCase = true) == true) {
+            return root
+        }
+
+        if (description != null && root.contentDescription?.toString()?.contains(description, ignoreCase = true) == true) {
+            return root
+        }
+
+        if (className != null && root.className?.toString()?.contains(className, ignoreCase = true) == true) {
+            return root
+        }
+
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            val found = findNode(child, text, description, className)
+            if (found != null) return found
+        }
+
+        return null
+    }
+
+    private fun findEditableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (root.isEditable) return root
+
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            val found = findEditableNode(child)
+            if (found != null) return found
+        }
+
+        return null
+    }
+
+    private fun findScrollableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (root.isScrollable) return root
+
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            val found = findScrollableNode(child)
+            if (found != null) return found
+        }
+
+        return null
+    }
+
+    override suspend fun healthCheck(): HealthStatus {
+        val healthy = service != null
+        return HealthStatus(
+            isHealthy = healthy,
+            latencyMs = 0,
+            message = if (healthy) "Accessibility service active" else "Accessibility service not available"
+        )
+    }
+
+    override fun getParamsSchema(): JSONObject = JSONObject().apply {
+        put("action", JSONObject().apply {
+            put("type", "string")
+            put("required", true)
+            put("enum", JSONArray(listOf("read", "click", "type", "scroll", "back", "home", "recents", "long_click", "find")))
+        })
+        put("text", JSONObject().apply {
+            put("type", "string")
+            put("description", "Text to find or type")
+        })
+        put("description", JSONObject().apply {
+            put("type", "string")
+            put("description", "Content description to find")
+        })
+        put("direction", JSONObject().apply {
+            put("type", "string")
+            put("enum", JSONArray(listOf("up", "down")))
+        })
+    }
+
+    companion object {
+        private const val TAG = "EnhancedAccessibilityTool"
+    }
+}
