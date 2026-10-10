@@ -17,10 +17,10 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Hybrid TTS:
- * - Offline-first: Android system TTS (any installed language)
- * - Online fallback only when network is available and system lacks the language
- * - Mixed FA/EN segments supported
+ * Hybrid TTS priority:
+ * 1) Offline neural Persian (Piper ONNX inside app) — no internet
+ * 2) System TTS (FA/EN if installed)
+ * 3) Online TTS only if network available
  */
 class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListener {
 
@@ -30,6 +30,7 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     private var systemEnOk = false
     private var mediaPlayer: MediaPlayer? = null
     private val speaking = AtomicBoolean(false)
+    private val offlineFa = OfflinePersianTts(context)
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
@@ -38,12 +39,17 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
 
     fun init() {
         tts = TextToSpeech(context, this)
+        // Load neural FA model if already downloaded
+        if (offlineFa.isModelDownloaded()) {
+            Thread { offlineFa.prepare() }.start()
+        }
     }
+
+    fun offlinePersian(): OfflinePersianTts = offlineFa
 
     override fun onInit(status: Int) {
         if (status != TextToSpeech.SUCCESS) {
             systemReady = false
-            Log.w(TAG, "System TTS init failed")
             return
         }
         systemReady = true
@@ -60,12 +66,9 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
                 en == TextToSpeech.LANG_COUNTRY_AVAILABLE ||
                 en == TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE
 
-        // Any system default as last offline resort
         if (systemFaOk) tts?.language = Locale("fa", "IR")
         else if (systemEnOk) tts?.language = Locale.US
         else tts?.language = Locale.getDefault()
-
-        Log.i(TAG, "TTS offline fa=$systemFaOk en=$systemEnOk ready=$systemReady")
     }
 
     fun speak(text: String, onDone: (() -> Unit)? = null) {
@@ -100,7 +103,21 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     }
 
     private fun speakSegment(text: String, lang: String, online: Boolean, onSegmentDone: () -> Unit) {
-        // 1) Prefer offline system voice for this language
+        // 1) Neural offline Persian (fully inside app)
+        if (lang == "fa" && offlineFa.isReady()) {
+            val lock = Object()
+            var finished = false
+            offlineFa.speak(text) {
+                synchronized(lock) { finished = true; lock.notifyAll() }
+                onSegmentDone()
+            }
+            synchronized(lock) {
+                if (!finished) try { lock.wait(120_000) } catch (_: InterruptedException) {}
+            }
+            return
+        }
+
+        // 2) System TTS
         val systemOk = when (lang) {
             "fa" -> systemReady && systemFaOk
             else -> systemReady && systemEnOk
@@ -109,18 +126,17 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
             speakSystem(text, lang, allowOnlineFallback = online, onDone = onSegmentDone)
             return
         }
-        // 2) Offline: any system voice (may mispronounce FA but works without net)
         if (systemReady) {
             speakSystem(text, if (systemEnOk) "en" else "default", allowOnlineFallback = online, onDone = onSegmentDone)
             return
         }
-        // 3) Online only if network exists
+
+        // 3) Online
         if (online) {
             speakOnline(text, lang, onSegmentDone)
             return
         }
-        // 4) Fully offline + no system TTS
-        Log.w(TAG, "No offline TTS and no network")
+        Log.w(TAG, "No TTS available offline")
         onSegmentDone()
     }
 
@@ -247,17 +263,16 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
 
     fun shutdown() {
         stop()
+        offlineFa.release()
         tts?.shutdown()
         tts = null
     }
 
     fun statusSummary(): String = buildString {
-        append("آفلاین: ")
-        append(if (systemReady) "بله" else "خیر")
-        append(" | FA: ")
+        append("عصبی FA: ")
+        append(if (offlineFa.isReady()) "آماده" else if (offlineFa.isModelDownloaded()) "دانلود شده" else "ندارد")
+        append(" | سیستم FA: ")
         append(if (systemFaOk) "دارد" else "ندارد")
-        append(" | EN: ")
-        append(if (systemEnOk) "دارد" else "ندارد")
         append(" | شبکه: ")
         append(if (NetworkUtils.isOnline(context)) "وصل" else "قطع")
     }
