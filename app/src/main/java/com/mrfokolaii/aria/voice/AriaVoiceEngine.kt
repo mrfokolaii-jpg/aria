@@ -6,6 +6,7 @@ import android.media.MediaPlayer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
+import com.mrfokolaii.aria.util.NetworkUtils
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -16,10 +17,10 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Hybrid TTS engine:
- * 1) System TTS if Persian/English voice data exists (warm pitch/rate)
- * 2) Online neural-style fallback (Google Translate TTS endpoint) when fa is missing
- * Supports mixed Persian + English in one utterance by splitting segments.
+ * Hybrid TTS:
+ * - Offline-first: Android system TTS (any installed language)
+ * - Online fallback only when network is available and system lacks the language
+ * - Mixed FA/EN segments supported
  */
 class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListener {
 
@@ -31,8 +32,8 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     private val speaking = AtomicBoolean(false)
 
     private val http = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
         .build()
 
     fun init() {
@@ -42,12 +43,10 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     override fun onInit(status: Int) {
         if (status != TextToSpeech.SUCCESS) {
             systemReady = false
-            Log.w(TAG, "System TTS init failed — online fallback only")
+            Log.w(TAG, "System TTS init failed")
             return
         }
         systemReady = true
-
-        // Warm, friendly defaults
         tts?.setSpeechRate(0.92f)
         tts?.setPitch(1.08f)
 
@@ -61,32 +60,23 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
                 en == TextToSpeech.LANG_COUNTRY_AVAILABLE ||
                 en == TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE
 
-        // Prefer FA if available, else EN
+        // Any system default as last offline resort
         if (systemFaOk) tts?.language = Locale("fa", "IR")
         else if (systemEnOk) tts?.language = Locale.US
+        else tts?.language = Locale.getDefault()
 
-        Log.i(TAG, "System TTS ready fa=$systemFaOk en=$systemEnOk")
-
-        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
-            override fun onDone(utteranceId: String?) { speaking.set(false) }
-            @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) { speaking.set(false) }
-        })
+        Log.i(TAG, "TTS offline fa=$systemFaOk en=$systemEnOk ready=$systemReady")
     }
 
-    /**
-     * Speak text with warm tone. Mixed FA/EN is split and spoken segment by segment.
-     */
     fun speak(text: String, onDone: (() -> Unit)? = null) {
         val clean = text.trim()
         if (clean.isEmpty()) {
             onDone?.invoke()
             return
         }
-
         stop()
         speaking.set(true)
+        val online = NetworkUtils.isOnline(context)
 
         Thread {
             try {
@@ -94,13 +84,12 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
                 for ((index, seg) in segments.withIndex()) {
                     if (!speaking.get()) break
                     val isLast = index == segments.lastIndex
-                    speakSegment(seg.text, seg.lang) {
+                    speakSegment(seg.text, seg.lang, online) {
                         if (isLast) {
                             speaking.set(false)
                             onDone?.invoke()
                         }
                     }
-                    // speakSegment is async for system TTS; for online we block until played
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "speak failed", e)
@@ -110,94 +99,97 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         }.start()
     }
 
-    private fun speakSegment(text: String, lang: String, onSegmentDone: () -> Unit) {
-        val useSystem = when (lang) {
+    private fun speakSegment(text: String, lang: String, online: Boolean, onSegmentDone: () -> Unit) {
+        // 1) Prefer offline system voice for this language
+        val systemOk = when (lang) {
             "fa" -> systemReady && systemFaOk
             else -> systemReady && systemEnOk
         }
-
-        if (useSystem) {
-            speakSystem(text, lang, onSegmentDone)
-        } else {
-            speakOnline(text, lang, onSegmentDone)
-        }
-    }
-
-    private fun speakSystem(text: String, lang: String, onDone: () -> Unit) {
-        val engine = tts ?: run {
-            speakOnline(text, lang, onDone)
+        if (systemOk) {
+            speakSystem(text, lang, allowOnlineFallback = online, onDone = onSegmentDone)
             return
         }
-        engine.language = if (lang == "fa") Locale("fa", "IR") else Locale.US
+        // 2) Offline: any system voice (may mispronounce FA but works without net)
+        if (systemReady) {
+            speakSystem(text, if (systemEnOk) "en" else "default", allowOnlineFallback = online, onDone = onSegmentDone)
+            return
+        }
+        // 3) Online only if network exists
+        if (online) {
+            speakOnline(text, lang, onSegmentDone)
+            return
+        }
+        // 4) Fully offline + no system TTS
+        Log.w(TAG, "No offline TTS and no network")
+        onSegmentDone()
+    }
+
+    private fun speakSystem(
+        text: String,
+        lang: String,
+        allowOnlineFallback: Boolean,
+        onDone: () -> Unit
+    ) {
+        val engine = tts
+        if (engine == null) {
+            if (allowOnlineFallback) speakOnline(text, lang, onDone) else onDone()
+            return
+        }
+        when (lang) {
+            "fa" -> engine.language = Locale("fa", "IR")
+            "en" -> engine.language = Locale.US
+            else -> engine.language = Locale.getDefault()
+        }
         engine.setSpeechRate(0.92f)
         engine.setPitch(1.08f)
 
-        val params = HashMap<String, String>()
-        val id = "aria_${System.currentTimeMillis()}"
-        params[TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID] = id
-
-        // Block until this utterance finishes (simple sync for sequential segments)
         val lock = Object()
         var finished = false
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
             override fun onDone(utteranceId: String?) {
-                synchronized(lock) {
-                    finished = true
-                    lock.notifyAll()
-                }
+                synchronized(lock) { finished = true; lock.notifyAll() }
                 onDone()
             }
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
-                synchronized(lock) {
-                    finished = true
-                    lock.notifyAll()
-                }
-                // fallback online on error
-                speakOnline(text, lang, onDone)
+                synchronized(lock) { finished = true; lock.notifyAll() }
+                if (allowOnlineFallback) speakOnline(text, lang, onDone) else onDone()
             }
         })
 
+        val params = HashMap<String, String>()
+        params[TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID] = "aria_${System.currentTimeMillis()}"
         val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, params)
         if (result == TextToSpeech.ERROR) {
-            speakOnline(text, lang, onDone)
+            if (allowOnlineFallback) speakOnline(text, lang, onDone) else onDone()
             return
         }
-
         synchronized(lock) {
-            if (!finished) {
-                try { lock.wait(60_000) } catch (_: InterruptedException) {}
-            }
+            if (!finished) try { lock.wait(60_000) } catch (_: InterruptedException) {}
         }
     }
 
-    /**
-     * Online fallback — works without Persian voice pack on the phone.
-     * Uses translate.google.com TTS (tl=fa / tl=en) with a friendly client UA.
-     */
     private fun speakOnline(text: String, lang: String, onDone: () -> Unit) {
+        if (!NetworkUtils.isOnline(context)) {
+            onDone()
+            return
+        }
         try {
-            val chunks = chunkText(text, 180)
-            for (chunk in chunks) {
+            for (chunk in chunkText(text, 180)) {
                 if (!speaking.get()) break
                 val tl = if (lang == "fa") "fa" else "en"
                 val encoded = URLEncoder.encode(chunk, "UTF-8")
                 val url =
                     "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&q=$encoded&tl=$tl"
-
                 val request = Request.Builder()
                     .url(url)
                     .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
                     .header("Referer", "https://translate.google.com/")
                     .get()
                     .build()
-
                 http.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        Log.w(TAG, "Online TTS HTTP ${response.code}")
-                        return@use
-                    }
+                    if (!response.isSuccessful) return@use
                     val bytes = response.body?.bytes() ?: return@use
                     val tmp = File(context.cacheDir, "aria_tts_${System.currentTimeMillis()}.mp3")
                     FileOutputStream(tmp).use { it.write(bytes) }
@@ -226,25 +218,17 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
                 )
                 setDataSource(file.absolutePath)
                 setOnCompletionListener {
-                    synchronized(lock) {
-                        done = true
-                        lock.notifyAll()
-                    }
+                    synchronized(lock) { done = true; lock.notifyAll() }
                 }
                 setOnErrorListener { _, _, _ ->
-                    synchronized(lock) {
-                        done = true
-                        lock.notifyAll()
-                    }
+                    synchronized(lock) { done = true; lock.notifyAll() }
                     true
                 }
                 prepare()
                 start()
             }
             synchronized(lock) {
-                if (!done) {
-                    try { lock.wait(90_000) } catch (_: InterruptedException) {}
-                }
+                if (!done) try { lock.wait(90_000) } catch (_: InterruptedException) {}
             }
         } catch (e: Exception) {
             Log.e(TAG, "playFile failed", e)
@@ -268,12 +252,14 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     }
 
     fun statusSummary(): String = buildString {
-        append("سیستم: ")
-        append(if (systemReady) "آماده" else "خاموش")
-        append(" | فارسی: ")
-        append(if (systemFaOk) "دارد" else "ندارد→آنلاین")
-        append(" | انگلیسی: ")
-        append(if (systemEnOk) "دارد" else "ندارد→آنلاین")
+        append("آفلاین: ")
+        append(if (systemReady) "بله" else "خیر")
+        append(" | FA: ")
+        append(if (systemFaOk) "دارد" else "ندارد")
+        append(" | EN: ")
+        append(if (systemEnOk) "دارد" else "ندارد")
+        append(" | شبکه: ")
+        append(if (NetworkUtils.isOnline(context)) "وصل" else "قطع")
     }
 
     data class Segment(val text: String, val lang: String)
@@ -281,26 +267,21 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     companion object {
         private const val TAG = "AriaVoiceEngine"
 
-        /** Split mixed FA/EN into consecutive same-script runs. */
         fun splitByScript(input: String): List<Segment> {
             val result = mutableListOf<Segment>()
             val sb = StringBuilder()
             var current: String? = null
-
             fun flush() {
                 val t = sb.toString().trim()
-                if (t.isNotEmpty() && current != null) {
-                    result.add(Segment(t, current!!))
-                }
+                if (t.isNotEmpty() && current != null) result.add(Segment(t, current!!))
                 sb.clear()
             }
-
             for (ch in input) {
                 val lang = when {
                     ch.code in 0x0600..0x06FF || ch.code in 0x0750..0x077F ||
                             ch.code in 0xFB50..0xFDFF || ch.code in 0xFE70..0xFEFF -> "fa"
                     ch.isLetter() && ch.code < 0x0250 -> "en"
-                    else -> current // keep punctuation with current run
+                    else -> current
                 }
                 if (lang != null && current != null && lang != current && ch.isLetter()) {
                     flush()
@@ -312,10 +293,7 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
                 }
             }
             flush()
-            if (result.isEmpty()) {
-                // default to Persian for digit-only / symbol text from this app
-                result.add(Segment(input.trim(), "fa"))
-            }
+            if (result.isEmpty()) result.add(Segment(input.trim(), "fa"))
             return result
         }
 
