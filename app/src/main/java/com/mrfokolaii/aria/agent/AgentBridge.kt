@@ -7,15 +7,20 @@ import com.mrfokolaii.aria.util.NetworkUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+/**
+ * Bridge between ARIA service and Agent Tools.
+ * Online: AI + web tools. Offline: local device tools still work.
+ */
 class AgentBridge(
     private val context: Context,
     apiKey: String,
     endpoint: String,
     model: String
 ) {
+
     private val toolManager = AgentToolManager(context)
     private val unoRouter = UnoRouterProvider(apiKey, endpoint, model)
-    private var lastUsedModel: String? = model
+    private var lastUsedModel: String? = null
 
     fun setAccessibilityService(service: android.accessibilityservice.AccessibilityService?) {
         toolManager.setAccessibilityService(service)
@@ -69,7 +74,7 @@ class AgentBridge(
             }
         }
 
-        // Free chat — always try cloud (network probe is unreliable on VPN/Xiaomi)
+        // Always try cloud chat (VPN/Xiaomi network probe is unreliable)
         val chatResponse = unoRouter.chat(userInput, conversationHistory)
         lastUsedModel = chatResponse.usedModel
         AgentResponse(text = chatResponse.text)
@@ -183,7 +188,7 @@ class AgentBridge(
                 ToolIntent("web_search", mapOf("query" to extractQuery(input)), useRouter = true)
             }
 
-            containsAny(lower, "سایت", "باز کن سایت", "browse", "http") -> {
+            containsAny(lower, "سایت", "browse", "http") -> {
                 val url = extractUrl(input)
                 if (url != null) ToolIntent("web_browse", mapOf("url" to url), useRouter = true)
                 else null
@@ -194,7 +199,7 @@ class AgentBridge(
     }
 
     private fun extractQuery(input: String): String =
-        input.replace(Regex("(جستجو|سرچ|search|google)\s*", RegexOption.IGNORE_CASE), "").trim()
+        input.replace(Regex("(جستجو|سرچ|search|google)\\s*", RegexOption.IGNORE_CASE), "").trim()
 
     private fun extractUrl(input: String): String? =
         Regex("https?://\\S+").find(input)?.value
@@ -202,31 +207,34 @@ class AgentBridge(
     private fun extractPhoneNumber(input: String): String? =
         Regex("0?9\\d{9}|\\+?\\d{10,13}").find(input.replace(" ", ""))?.value
 
-    private fun extractAppName(input: String): String? {
-        val cleaned = input.replace(Regex("(باز کن|اجرا کن|برنامه|اپ|open|launch)", RegexOption.IGNORE_CASE), "").trim()
-        return cleaned.takeIf { it.isNotBlank() && it.length < 40 }
-    }
+    private fun extractAppName(input: String): String? =
+        input.replace(Regex("(باز کن|اجرا کن|برنامه|اپ|open|launch|app)", RegexOption.IGNORE_CASE), "")
+            .trim().takeIf { it.isNotEmpty() }
 
-    private fun extractTargetText(input: String): String? {
-        val cleaned = input.replace(Regex("(کلیک|بزن|فشار بده|تایپ کن|بنویس|وارد کن|click|tap|type)", RegexOption.IGNORE_CASE), "").trim()
-        return cleaned.takeIf { it.isNotBlank() }
-    }
+    private fun extractTargetText(input: String): String? =
+        input.replace(Regex("(کلیک|بزن|فشار بده|تایپ کن|بنویس|وارد کن|click|tap|type|enter|روی|on)", RegexOption.IGNORE_CASE), "")
+            .trim().takeIf { it.isNotEmpty() }
 
     private fun containsAny(text: String, vararg keywords: String): Boolean =
-        keywords.any { text.contains(it) }
+        keywords.any { text.contains(it, ignoreCase = true) }
 
     private suspend fun generateResponseWithToolData(userInput: String, toolResult: ToolResult): String {
-        val summary = formatToolResult(toolResult)
-        val prompt = "کاربر گفت: $userInput\nنتیجه ابزار: $summary\nیک پاسخ کوتاه فارسی بده."
-        return unoRouter.chat(prompt).text
+        val prompt = buildString {
+            append("کاربر پرسیده: $userInput\n\n")
+            append("من این اطلاعات رو براش پیدا کردم:\n")
+            append(formatToolResult(toolResult))
+            append("\n\nلطفاً یک پاسخ کوتاه و دوستانه به فارسی بده که این اطلاعات رو خلاصه کنه.")
+        }
+        val chatResponse = unoRouter.chat(prompt, emptyList())
+        lastUsedModel = chatResponse.usedModel
+        return chatResponse.text
     }
 
     private fun formatToolResult(result: ToolResult): String {
-        return when (val d = result.data) {
-            is Map<*, *> -> d.entries.joinToString(", ") { "${it.key}=${it.value}" }
-            is String -> d
-            null -> result.error ?: "ok"
-            else -> d.toString()
+        return when (val data = result.data) {
+            is List<*> -> data.take(5).mapIndexed { i, item -> "${i + 1}. $item" }.joinToString("\n")
+            is Map<*, *> -> data.entries.joinToString("\n") { "${it.key}: ${it.value}" }
+            else -> data.toString()
         }
     }
 
@@ -252,19 +260,19 @@ class AgentBridge(
         }
     }
 
-    data class AgentResponse(
-        val text: String,
-        val usedTool: String? = null,
-        val toolResult: ToolResult? = null
-    )
-
-    private data class ToolIntent(
-        val toolName: String,
-        val params: Map<String, Any> = emptyMap(),
-        val useRouter: Boolean = false
-    )
-
     companion object {
         private const val TAG = "AgentBridge"
     }
 }
+
+data class ToolIntent(
+    val toolName: String,
+    val params: Map<String, Any>,
+    val useRouter: Boolean = false
+)
+
+data class AgentResponse(
+    val text: String,
+    val usedTool: String? = null,
+    val toolResult: ToolResult? = null
+)
