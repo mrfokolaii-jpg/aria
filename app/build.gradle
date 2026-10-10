@@ -7,10 +7,6 @@ android {
     namespace 'com.mrfokolaii.aria'
     compileSdk 35
 
-    aaptOptions {
-        cruncherEnabled = false
-    }
-
     defaultConfig {
         applicationId 'com.mrfokolaii.aria2'
         minSdk 26
