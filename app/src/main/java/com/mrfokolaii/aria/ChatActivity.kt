@@ -18,6 +18,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.mrfokolaii.aria.agent.AgentBridge
 import com.mrfokolaii.aria.agent.UnoRouterProvider
+import com.mrfokolaii.aria.memory.ChatHistoryStore
 import com.mrfokolaii.aria.memory.PersistentMemory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,21 +26,16 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.UUID
 
 class ChatActivity : AppCompatActivity() {
 
     private lateinit var chatContainer: LinearLayout
     private lateinit var scrollView: ScrollView
     private lateinit var inputField: EditText
-    private lateinit var memory: PersistentMemory
+    private lateinit var chatStore: ChatHistoryStore
+    private lateinit var knowledgeMemory: PersistentMemory
     private var agentBridge: AgentBridge? = null
-    private val history = mutableListOf<Pair<String, String>>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var sessionId = ""
     private var pendingFileUri: Uri? = null
     private var isSending = false
 
@@ -56,12 +52,17 @@ class ChatActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        memory = PersistentMemory(this)
-        sessionId = intent.getStringExtra("session_id")
-            ?: SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + "_" + UUID.randomUUID().toString().take(6)
+        chatStore = ChatHistoryStore(this)
+        knowledgeMemory = PersistentMemory(this)
         initBridge()
         buildUi()
         loadHistory()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Refresh so voice messages appear when returning from widget
+        reloadBubbles()
     }
 
     private fun initBridge() {
@@ -96,10 +97,8 @@ class ChatActivity : AppCompatActivity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#0D0D0D"))
-            setPadding(0, 0, 0, 0)
         }
 
-        // Toolbar
         val toolbar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#1A1A2E"))
@@ -107,16 +106,20 @@ class ChatActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         toolbar.addView(TextView(this).apply {
-            text = "💬 چت آریا"
-            textSize = 18f
+            text = "💬 چت آریا (حافظه دائمی)"
+            textSize = 16f
             setTextColor(Color.WHITE)
             setTypeface(null, Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
         toolbar.addView(Button(this).apply {
-            text = "+‌جدید"
-            textSize = 12f
-            setOnClickListener { startNewSession() }
+            text = "پاک کردن"
+            textSize = 11f
+            setOnClickListener {
+                chatStore.clear()
+                reloadBubbles()
+                addBubble("assistant", "تاریخچه پاک شد. از صفر شروع می‌کنیم.", "chat")
+            }
         })
         toolbar.addView(Button(this).apply {
             text = "⚙"
@@ -127,7 +130,6 @@ class ChatActivity : AppCompatActivity() {
         })
         root.addView(toolbar)
 
-        // Chat area
         scrollView = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
@@ -140,7 +142,6 @@ class ChatActivity : AppCompatActivity() {
         scrollView.addView(chatContainer)
         root.addView(scrollView)
 
-        // Input bar
         val inputBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#1A1A2E"))
@@ -179,22 +180,23 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun loadHistory() {
-        val saved = memory.loadConversation(sessionId)
-        if (saved.isEmpty()) {
-            addBubble("assistant", "سلام! من آریا هستم. می‌تونی متن بنویسی، فایل بفرستی، یا از من بخوای جستجو و نکته‌برداری کنم.")
-            return
+        reloadBubbles()
+        if (chatStore.messageCount() == 0) {
+            addBubble(
+                "assistant",
+                "سلام! من آریا هستم. مکالمه‌های صوتی و متنی اینجا ذخیره می‌شوند و فراموش نمی‌کنم. (فقط داخل اپ — نه روی حافظه خارجی)",
+                "chat"
+            )
         }
-        history.clear()
-        history.addAll(saved)
-        saved.forEach { (role, text) -> addBubble(role, text, scroll = false) }
-        scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
     }
 
-    private fun startNewSession() {
-        sessionId = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + "_" + UUID.randomUUID().toString().take(6)
-        history.clear()
+    private fun reloadBubbles() {
         chatContainer.removeAllViews()
-        addBubble("assistant", "صفحه جدید. چطور کمکت کنم؟")
+        val messages = chatStore.loadAll()
+        messages.forEach { msg ->
+            addBubble(msg.role, msg.text, msg.source, scroll = false)
+        }
+        scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
     }
 
     private fun sendMessage() {
@@ -207,18 +209,16 @@ class ChatActivity : AppCompatActivity() {
         if (fileUri != null) {
             val name = fileUri.lastPathSegment ?: "فایل"
             text = if (text.isBlank()) "[فایل پیوست: $name]" else "$text\n[فایل پیوست: $name]"
-            // Note: binary analysis of images/zips needs vision API; for now we pass the name
             pendingFileUri = null
             inputField.hint = "پیام خود را بنویسید..."
         }
 
         inputField.setText("")
-        addBubble("user", text)
-        history.add("user" to text)
-        memory.appendConversation(sessionId, "user", text)
+        chatStore.append("user", text, source = "chat")
+        addBubble("user", text, "chat")
 
         isSending = true
-        val thinking = addBubble("assistant", "در حال فکر کردن...")
+        val thinking = addBubble("assistant", "در حال فکر کردن...", "chat")
 
         scope.launch {
             try {
@@ -228,24 +228,22 @@ class ChatActivity : AppCompatActivity() {
                     return@launch
                 }
 
-                // Auto-note intent
                 val lower = text.lowercase()
                 if (lower.contains("یادداشت") || lower.contains("نکته") || lower.contains("ذخیره کن") || lower.contains("note")) {
-                    memory.saveNote("auto_note_${System.currentTimeMillis()}", text, listOf("user_request"))
+                    knowledgeMemory.saveNote("auto_note_${System.currentTimeMillis()}", text, listOf("user_request"))
                 }
+
+                // Full history — AI does not forget previous messages
+                val history = chatStore.asHistoryPairs()
 
                 val response = withContext(Dispatchers.IO) {
-                    bridge.processWithAgentTools(text, history.toList())
+                    bridge.processWithAgentTools(text, history)
                 }
 
-                // If tool returned web data, auto-catalog sites
-                response.toolResult?.data?.let { data ->
-                    catalogFromToolData(data)
-                }
+                response.toolResult?.data?.let { catalogFromToolData(it) }
 
+                chatStore.append("assistant", response.text, source = "chat")
                 updateBubble(thinking, response.text)
-                history.add("assistant" to response.text)
-                memory.appendConversation(sessionId, "assistant", response.text)
             } catch (e: Exception) {
                 updateBubble(thinking, "خطا: ${e.localizedMessage}")
             } finally {
@@ -261,7 +259,7 @@ class ChatActivity : AppCompatActivity() {
                     val url = data["url"]?.toString()
                     val content = data["content"]?.toString() ?: ""
                     if (url != null && url.startsWith("http")) {
-                        memory.saveSite(
+                        knowledgeMemory.saveSite(
                             url = url,
                             title = data["title"]?.toString() ?: url,
                             categories = listOf("web"),
@@ -273,7 +271,7 @@ class ChatActivity : AppCompatActivity() {
                     val results = data["results"] as? List<Map<String, Any>>
                     results?.forEach { item ->
                         val u = item["url"]?.toString() ?: return@forEach
-                        memory.saveSite(
+                        knowledgeMemory.saveSite(
                             url = u,
                             title = item["title"]?.toString() ?: item["name"]?.toString() ?: u,
                             categories = listOf(item["language"]?.toString() ?: "search"),
@@ -286,7 +284,7 @@ class ChatActivity : AppCompatActivity() {
                     data.forEach { item ->
                         if (item is Map<*, *>) {
                             val u = item["url"]?.toString() ?: return@forEach
-                            memory.saveSite(
+                            knowledgeMemory.saveSite(
                                 url = u,
                                 title = item["title"]?.toString() ?: u,
                                 categories = listOf("search"),
@@ -300,16 +298,21 @@ class ChatActivity : AppCompatActivity() {
         } catch (_: Exception) {}
     }
 
-    private fun addBubble(role: String, text: String, scroll: Boolean = true): TextView {
+    private fun addBubble(role: String, text: String, source: String = "chat", scroll: Boolean = true): TextView {
         val isUser = role == "user"
+        val prefix = if (source == "voice") "🎤 " else ""
         val bubble = TextView(this).apply {
-            this.text = text
+            this.text = prefix + text
             textSize = 14f
             setTextColor(Color.WHITE)
             setPadding(28, 18, 28, 18)
             setBackgroundColor(
-                if (isUser) Color.parseColor("#1565C0")
-                else Color.parseColor("#2A2A3E")
+                when {
+                    isUser && source == "voice" -> Color.parseColor("#0D47A1")
+                    isUser -> Color.parseColor("#1565C0")
+                    source == "voice" -> Color.parseColor("#1B3A2F")
+                    else -> Color.parseColor("#2A2A3E")
+                }
             )
             val lp = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
