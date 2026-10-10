@@ -1,5 +1,6 @@
 package com.mrfokolaii.aria.agent.tools
 
+import android.util.Log
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -7,9 +8,13 @@ import kotlinx.coroutines.coroutineScope
 class ToolRegistry {
     private val tools = mutableMapOf<String, AgentTool>()
     private val healthCache = mutableMapOf<String, HealthStatus>()
-    private val HEALTH_CACHE_TTL = 300_000L // 5 minutes
+    private val HEALTH_CACHE_TTL = 300_000L
 
-    fun register(tool: AgentTool) {
+    fun register(tool: AgentTool?) {
+        if (tool == null) {
+            Log.w("ToolRegistry", "Skipped null tool")
+            return
+        }
         tools[tool.name] = tool
     }
 
@@ -25,7 +30,8 @@ class ToolRegistry {
 
         val cached = healthCache[toolName]
         if (!forceRefresh && cached != null &&
-            System.currentTimeMillis() - cached.lastChecked < HEALTH_CACHE_TTL) {
+            System.currentTimeMillis() - cached.lastChecked < HEALTH_CACHE_TTL
+        ) {
             return cached
         }
 
