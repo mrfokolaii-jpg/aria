@@ -44,8 +44,11 @@ class UnoRouterProvider(
             val messages = JSONArray()
             messages.put(JSONObject().put("role", "system").put("content", systemPrompt))
 
-            history.takeLast(8).forEach { (role, content) ->
+            // Keep a long context so the assistant does not forget prior turns
+            history.takeLast(40).forEach { (role, content) ->
                 val r = if (role == "user") "user" else "assistant"
+                // Skip duplicate of the current user message if already in history
+                if (r == "user" && content == userMessage) return@forEach
                 messages.put(JSONObject().put("role", r).put("content", content))
             }
             messages.put(JSONObject().put("role", "user").put("content", userMessage))
@@ -138,6 +141,7 @@ class UnoRouterProvider(
         const val DEFAULT_SYSTEM = """
 تو آریا هستی، یک دستیار هوشمند فارسی‌زبان روی اندروید.
 پاسخ‌هایت را کوتاه، واضح و دوستانه به فارسی بده.
+تاریخچه مکالمه به تو داده می‌شود؛ همیشه آن را در نظر بگیر و چیزی را فراموش نکن.
 اگر نیاز به ابزار داری (جستجو، باز کردن برنامه و ...) مستقیم و شفاف عمل کن.
 """.trim()
 
