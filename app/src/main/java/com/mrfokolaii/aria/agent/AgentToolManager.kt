@@ -2,7 +2,6 @@ package com.mrfokolaii.aria.agent
 
 import android.util.Log
 import com.mrfokolaii.aria.agent.tools.*
-import android.accessibilityservice.AccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -18,51 +17,49 @@ class AgentToolManager(private val context: android.content.Context? = null) {
     private val registry = ToolRegistry()
     private val router = ToolRouter(registry)
 
+    // MUST be initialized before registerAllTools() / init block
+    private val enhancedAccessibility = EnhancedAccessibilityTool()
+
     init {
         registerAllTools()
     }
-
-    private val enhancedAccessibility = EnhancedAccessibilityTool()
 
     fun setAccessibilityService(service: android.accessibilityservice.AccessibilityService?) {
         enhancedAccessibility.setService(service)
     }
 
     private fun registerAllTools() {
-        // Web Tools
-        registry.register(WebSearchTool(client))
-        registry.register(WebBrowseTool(client))
+        fun safeRegister(tool: AgentTool?) {
+            if (tool != null) {
+                try {
+                    registry.register(tool)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to register tool: ${e.message}")
+                }
+            }
+        }
 
-        // Code Repository Tools (with Knowledge Base)
-        registry.register(GitHubTool(client, context))
+        safeRegister(WebSearchTool(client))
+        safeRegister(WebBrowseTool(client))
+        safeRegister(GitHubTool(client, context))
+        safeRegister(YouTubeTool(client))
+        safeRegister(RedditTool(client))
+        safeRegister(InstagramTool(client))
+        safeRegister(BilibiliTool(client))
+        safeRegister(RSSReaderTool(client))
 
-        // Media Tools
-        registry.register(YouTubeTool(client))
-
-        // Social Media Tools (limited to functional ones)
-        registry.register(RedditTool(client))
-        registry.register(InstagramTool(client))
-        registry.register(BilibiliTool(client))
-        // Twitter, Facebook, LinkedIn, Xiaohongshu disabled - require API auth
-
-        // RSS Tools
-        registry.register(RSSReaderTool(client))
-
-        // System Tools (require Context)
         context?.let { ctx ->
-            registry.register(PhoneTool(ctx))
-            registry.register(SMSTool(ctx))
-            registry.register(AppLauncherTool(ctx))
-            registry.register(ScreenReaderTool())
-            registry.register(enhancedAccessibility)
-
-            // Iranian Communication Apps
-            registry.register(BaleTool(ctx))
-            registry.register(EitaaTool(ctx))
-            registry.register(RubikaTool(ctx))
-            registry.register(WhatsAppTool(ctx))
-            registry.register(TelegramTool(ctx))
-            registry.register(InstagramAppTool(ctx))
+            safeRegister(PhoneTool(ctx))
+            safeRegister(SMSTool(ctx))
+            safeRegister(AppLauncherTool(ctx))
+            safeRegister(ScreenReaderTool())
+            safeRegister(enhancedAccessibility)
+            safeRegister(BaleTool(ctx))
+            safeRegister(EitaaTool(ctx))
+            safeRegister(RubikaTool(ctx))
+            safeRegister(WhatsAppTool(ctx))
+            safeRegister(TelegramTool(ctx))
+            safeRegister(InstagramAppTool(ctx))
         }
 
         Log.d(TAG, "Registered ${registry.getAllTools().size} tools")
@@ -71,7 +68,6 @@ class AgentToolManager(private val context: android.content.Context? = null) {
     suspend fun executeToolByName(toolName: String, params: Map<String, Any>): ToolResult {
         val tool = registry.getTool(toolName)
             ?: return ToolResult(false, null, "Tool not found: $toolName")
-
         return tool.execute(params)
     }
 
@@ -79,62 +75,38 @@ class AgentToolManager(private val context: android.content.Context? = null) {
         return router.route(userRequest, params)
     }
 
-    suspend fun checkToolHealth(toolName: String): HealthStatus? {
-        return registry.checkHealth(toolName)
-    }
+    fun getRegistry(): ToolRegistry = registry
 
-    suspend fun checkAllToolsHealth(): Map<String, HealthStatus> {
-        return registry.checkAllHealth()
-    }
-
-    fun listAllTools(): List<Map<String, Any>> {
-        return registry.getAllTools().map { tool ->
-            mapOf(
-                "name" to tool.name,
-                "description" to tool.description,
-                "category" to tool.category.name
-            )
-        }
-    }
+    fun getRouter(): ToolRouter = router
 
     suspend fun runDoctorCheck(): DoctorReport = withContext(Dispatchers.IO) {
-        Log.d(TAG, "Running doctor check on all tools...")
-        val healthResults = checkAllToolsHealth()
-
+        val healthResults = registry.checkAllHealth()
         val healthy = healthResults.filter { it.value.isHealthy }
         val unhealthy = healthResults.filter { !it.value.isHealthy }
 
-        val report = DoctorReport(
+        DoctorReport(
             totalTools = registry.getAllTools().size,
             healthyTools = healthy.size,
             unhealthyTools = unhealthy.size,
             healthDetails = healthResults,
             recommendations = generateRecommendations(unhealthy)
         )
-
-        Log.d(TAG, "Doctor check complete: ${healthy.size}/${registry.getAllTools().size} tools healthy")
-        return@withContext report
     }
 
     private fun generateRecommendations(unhealthy: Map<String, HealthStatus>): List<String> {
         val recommendations = mutableListOf<String>()
-
         unhealthy.forEach { (toolName, status) ->
             when {
                 status.message.contains("authentication", ignoreCase = true) ->
                     recommendations.add("$toolName: Configure API credentials")
-
                 status.message.contains("timeout", ignoreCase = true) ->
                     recommendations.add("$toolName: Check network connection")
-
                 status.message.contains("404", ignoreCase = true) ->
                     recommendations.add("$toolName: Service endpoint may have changed")
-
                 else ->
                     recommendations.add("$toolName: ${status.message}")
             }
         }
-
         return recommendations
     }
 
