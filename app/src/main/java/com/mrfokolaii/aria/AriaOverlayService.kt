@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -37,7 +38,6 @@ class AriaOverlayService : Service() {
 
     private var windowManager: WindowManager? = null
     private var floatButton: Button? = null
-    /** Named overlayParams to avoid clashing with View.layoutParams inside Button.apply */
     private var overlayParams: WindowManager.LayoutParams? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private var isListening = false
@@ -55,42 +55,51 @@ class AriaOverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        chatStore = ChatHistoryStore(this)
-        voice = AriaVoiceEngine(this).also { it.init() }
-        startForegroundNotification()
-        initAgentBridge()
-        initSpeechRecognizer()
-        initFloatingWidget()
-        resetInactivityTimer()
+        try {
+            chatStore = ChatHistoryStore(this)
+            voice = AriaVoiceEngine(this).also { it.init() }
+            startForegroundNotification()
+            initAgentBridge()
+            initSpeechRecognizer()
+            initFloatingWidget()
+            resetInactivityTimer()
+        } catch (e: Exception) {
+            Log.e(TAG, "onCreate failed", e)
+            stopSelf()
+        }
     }
 
     private fun startForegroundNotification() {
         val channelId = "aria_overlay"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                channelId, "ARIA Assistant",
-                NotificationManager.IMPORTANCE_LOW
-            )
+                channelId, "ARIA ویجت",
+                NotificationManager.IMPORTANCE_MIN
+            ).apply {
+                description = "سرویس ویجت شناور"
+                setShowBadge(false)
+            }
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
-        val showIntent = Intent(this, AriaOverlayService::class.java).apply {
-            action = ACTION_SHOW
-        }
-        val showPending = PendingIntent.getService(
-            this, 1, showIntent, PendingIntent.FLAG_IMMUTABLE
-        )
-        val chatPending = PendingIntent.getActivity(
+        val openApp = PendingIntent.getActivity(
             this, 0,
             Intent(this, ChatActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
+        val showPending = PendingIntent.getService(
+            this, 1,
+            Intent(this, AriaOverlayService::class.java).apply { action = ACTION_SHOW },
+            PendingIntent.FLAG_IMMUTABLE
+        )
         val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("ARIA فعال است")
-            .setContentText("ضربه = صحبت | نوتیف = نمایش ویجت")
+            .setContentTitle("ARIA")
+            .setContentText("ویجت صوتی فعال")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentIntent(showPending)
-            .addAction(0, "چت متنی", chatPending)
+            .setContentIntent(openApp)
+            .addAction(0, "نمایش ویجت", showPending)
             .setOngoing(true)
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
         startForeground(1, notification)
     }
@@ -191,6 +200,16 @@ class AriaOverlayService : Service() {
     }
 
     private fun initFloatingWidget() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            Toast.makeText(
+                this,
+                "مجوز «نمایش روی برنامه‌ها» را بدهید تا ویجت دیده شود",
+                Toast.LENGTH_LONG
+            ).show()
+            Log.w(TAG, "SYSTEM_ALERT_WINDOW not granted")
+            return
+        }
+
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
         val layoutFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -254,7 +273,10 @@ class AriaOverlayService : Service() {
                             params.x = initialX + dx
                             params.y = initialY + dy
                             if (!isHidden) {
-                                windowManager?.updateViewLayout(floatButton, params)
+                                try {
+                                    windowManager?.updateViewLayout(floatButton, params)
+                                } catch (_: Exception) {
+                                }
                             }
                         }
                         true
@@ -273,6 +295,7 @@ class AriaOverlayService : Service() {
             isHidden = false
         } catch (e: Exception) {
             Log.e(TAG, "Failed to add overlay", e)
+            Toast.makeText(this, "نمایش ویجت ممکن نشد: مجوز را چک کنید", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -412,7 +435,10 @@ class AriaOverlayService : Service() {
         serviceScope.cancel()
         handler.removeCallbacks(inactivityRunnable)
         speechRecognizer?.destroy()
-        voice.shutdown()
+        try {
+            voice.shutdown()
+        } catch (_: Exception) {
+        }
         if (!isHidden) {
             floatButton?.let {
                 try { windowManager?.removeView(it) } catch (_: Exception) {}
