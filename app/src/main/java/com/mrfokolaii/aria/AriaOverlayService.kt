@@ -25,15 +25,13 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.mrfokolaii.aria.agent.AgentBridge
 import com.mrfokolaii.aria.agent.UnoRouterProvider
-import com.mrfokolaii.aria.memory.PersistentMemory
+import com.mrfokolaii.aria.memory.ChatHistoryStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 
 class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
@@ -50,17 +48,14 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
 
     private val handler = Handler(Looper.getMainLooper())
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val conversationHistory = mutableListOf<Pair<String, String>>()
     private var agentBridge: AgentBridge? = null
-    private lateinit var memory: PersistentMemory
-    private val sessionId = "voice_" + SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
+    private lateinit var chatStore: ChatHistoryStore
 
-    /** Auto-hide after 40 seconds of silence (range 30-50s as requested) */
     private val inactivityRunnable = Runnable { hideWidget() }
 
     override fun onCreate() {
         super.onCreate()
-        memory = PersistentMemory(this)
+        chatStore = ChatHistoryStore(this)
         startForegroundNotification()
         tts = TextToSpeech(this, this)
         initAgentBridge()
@@ -274,7 +269,6 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         try {
             floatButton?.let { windowManager?.removeView(it) }
             isHidden = true
-            Log.d(TAG, "Widget auto-hidden after inactivity")
         } catch (e: Exception) {
             Log.w(TAG, "hide failed: ${e.message}")
         }
@@ -292,10 +286,8 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
             isHidden = false
             updateButton("🤖 ARIA", 0xFF00E676.toInt())
             resetInactivityTimer()
-            Log.d(TAG, "Widget shown again")
         } catch (e: Exception) {
             Log.e(TAG, "show failed", e)
-            // Recreate if view was lost
             initFloatingWidget()
         }
     }
@@ -334,8 +326,8 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         updateButton("⏳ فکر می‌کنم...", 0xFFFFAB40.toInt())
         Toast.makeText(this, "شما: $text", Toast.LENGTH_SHORT).show()
 
-        // Persist user message
-        memory.appendConversation(sessionId, "user", text)
+        // Save to in-app chat only (NOT external Grok / phone storage)
+        chatStore.append("user", text, source = "voice")
 
         serviceScope.launch {
             try {
@@ -345,24 +337,14 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
                     return@launch
                 }
 
-                // Auto-save notes on request
-                val lower = text.lowercase()
-                if (lower.contains("یادداشت") || lower.contains("نکته") || lower.contains("ذخیره")) {
-                    memory.saveNote("voice_${System.currentTimeMillis()}", text, listOf("voice"))
-                }
+                // Full chat history so the AI does not forget previous turns
+                val history = chatStore.asHistoryPairs()
 
                 val response = withContext(Dispatchers.IO) {
-                    bridge.processWithAgentTools(text, conversationHistory.toList())
+                    bridge.processWithAgentTools(text, history)
                 }
 
-                conversationHistory.add("user" to text)
-                conversationHistory.add("assistant" to response.text)
-                if (conversationHistory.size > 16) {
-                    conversationHistory.removeAt(0)
-                    conversationHistory.removeAt(0)
-                }
-
-                memory.appendConversation(sessionId, "assistant", response.text)
+                chatStore.append("assistant", response.text, source = "voice")
                 speak(response.text)
             } catch (e: Exception) {
                 Log.e(TAG, "processUserInput failed", e)
@@ -394,7 +376,6 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
 
     private fun resetInactivityTimer() {
         handler.removeCallbacks(inactivityRunnable)
-        // 40 seconds in the requested 30-50s range
         handler.postDelayed(inactivityRunnable, 40_000)
     }
 
