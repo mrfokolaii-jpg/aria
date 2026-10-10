@@ -24,8 +24,41 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Android SDK (runner preinstalled)
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          # GitHub-hosted runners ship an Android SDK under this path
+          if [ -z "$ANDROID_HOME" ] || [ ! -d "$ANDROID_HOME" ]; then
+            if [ -d "$ANDROID_SDK_ROOT" ]; then
+              export ANDROID_HOME="$ANDROID_SDK_ROOT"
+            elif [ -d "$HOME/Android/Sdk" ]; then
+              export ANDROID_HOME="$HOME/Android/Sdk"
+            elif [ -d "/usr/local/lib/android/sdk" ]; then
+              export ANDROID_HOME="/usr/local/lib/android/sdk"
+            fi
+          fi
+
+          echo "Using ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+          # Accept licenses & ensure platform 35 + build-tools exist when sdkmanager is available
+          SDKMANAGER=""
+          if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          elif ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager >/dev/null 2>&1; then
+            SDKMANAGER=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | head -n1)
+          fi
+
+          if [ -n "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+            "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "platform-tools" || true
+          else
+            echo "sdkmanager not found; relying on preinstalled packages"
+            ls -la "$ANDROID_HOME" || true
+          fi
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -44,6 +77,7 @@ jobs:
           name: aria-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
+          if-no-files-found: error
 
       - name: Publish Release with APK
         uses: softprops/action-gh-release@v2
@@ -51,10 +85,9 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: "ARIA APK build ${{ github.run_number }}"
           body: |
-            APK دیباگ ساخته‌شده از commit `${{ github.sha }}`
+            APK دیباگ از commit `${{ github.sha }}`
 
-            **نصب:** فایل `app-debug.apk` را دانلود و روی گوشی نصب کنید.
-            (ممکن است نیاز باشد «نصب از منابع ناشناخته» را فعال کنید.)
+            فایل `app-debug.apk` را دانلود و نصب کنید.
           files: app/build/outputs/apk/debug/*.apk
           draft: false
           prerelease: true
