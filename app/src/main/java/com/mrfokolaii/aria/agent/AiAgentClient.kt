@@ -12,19 +12,24 @@ object AiAgentClient {
     fun prompt(context: Context, userPrompt: String): String {
         val prefs = context.getSharedPreferences("aria", Context.MODE_PRIVATE)
         val activeProvider = prefs.getString("active_provider", "groq") ?: "groq"
-        
+
         val (apiKey, apiUrl, modelName) = when (activeProvider) {
-            "groq" -> arrayOf(
+            "groq" -> Triple(
                 prefs.getString("groq_api_key", "") ?: "",
-                "https://api.groq.com/openai/v1/chat/completions",
-                "llama-3.3-70b-versatile"
+                "${UnoRouterProvider.GROQ_BASE}/chat/completions",
+                prefs.getString("groq_model", "llama-3.3-70b-versatile") ?: "llama-3.3-70b-versatile"
             )
-            "openrouter" -> arrayOf(
+            "openrouter" -> Triple(
                 prefs.getString("openrouter_api_key", "") ?: "",
-                "https://openrouter.ai/api/v1/chat/completions",
+                "${UnoRouterProvider.OPENROUTER_BASE}/chat/completions",
                 prefs.getString("openrouter_model", "google/gemini-flash-1.5") ?: "google/gemini-flash-1.5"
             )
-            else -> arrayOf(
+            "xai" -> Triple(
+                prefs.getString("xai_api_key", "") ?: "",
+                "${UnoRouterProvider.XAI_BASE}/chat/completions",
+                prefs.getString("xai_model", "grok-3") ?: "grok-3"
+            )
+            else -> Triple(
                 prefs.getString("custom_api_key", "") ?: "",
                 prefs.getString("custom_api_url", "") ?: "",
                 prefs.getString("custom_model", "") ?: ""
@@ -42,13 +47,16 @@ object AiAgentClient {
                 setRequestProperty("Authorization", "Bearer $apiKey")
                 setRequestProperty("Content-Type", "application/json")
                 doOutput = true
-                connectTimeout = 15000
-                readTimeout = 15000
+                connectTimeout = 20000
+                readTimeout = 45000
             }
 
             val jsonBody = JSONObject().apply {
                 put("model", modelName)
-                put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", userPrompt)))
+                put("messages", JSONArray().put(
+                    JSONObject().put("role", "user").put("content", userPrompt)
+                ))
+                put("max_tokens", 1024)
             }
 
             conn.outputStream.use { os ->
