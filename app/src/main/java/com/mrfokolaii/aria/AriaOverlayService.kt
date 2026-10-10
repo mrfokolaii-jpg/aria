@@ -37,7 +37,8 @@ class AriaOverlayService : Service() {
 
     private var windowManager: WindowManager? = null
     private var floatButton: Button? = null
-    private var layoutParams: WindowManager.LayoutParams? = null
+    /** Named overlayParams to avoid clashing with View.layoutParams inside Button.apply */
+    private var overlayParams: WindowManager.LayoutParams? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private var isListening = false
     private var isProcessing = false
@@ -147,7 +148,6 @@ class AriaOverlayService : Service() {
                 override fun onError(error: Int) {
                     isListening = false
                     isProcessing = false
-                    // If Persian STT fails, retry once with English
                     if (!preferEnglishStt &&
                         (error == SpeechRecognizer.ERROR_NO_MATCH ||
                                 error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
@@ -200,7 +200,7 @@ class AriaOverlayService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        layoutParams = WindowManager.LayoutParams(
+        overlayParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             layoutFlag,
@@ -236,7 +236,7 @@ class AriaOverlayService : Service() {
             var moved = false
 
             setOnTouchListener { _, event ->
-                val params = layoutParams ?: return@setOnTouchListener false
+                val params = overlayParams ?: return@setOnTouchListener false
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
                         initialX = params.x
@@ -269,7 +269,7 @@ class AriaOverlayService : Service() {
         }
 
         try {
-            windowManager?.addView(floatButton, layoutParams)
+            windowManager?.addView(floatButton, overlayParams)
             isHidden = false
         } catch (e: Exception) {
             Log.e(TAG, "Failed to add overlay", e)
@@ -293,7 +293,7 @@ class AriaOverlayService : Service() {
         }
         try {
             floatButton?.let { btn ->
-                layoutParams?.let { windowManager?.addView(btn, it) }
+                overlayParams?.let { windowManager?.addView(btn, it) }
             }
             isHidden = false
             updateButton("🤖 ARIA", 0xFF00E676.toInt())
@@ -329,7 +329,6 @@ class AriaOverlayService : Service() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            // Allow mixed / free-form recognition
             putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
         }
 
@@ -387,7 +386,6 @@ class AriaOverlayService : Service() {
     private fun speak(text: String) {
         handler.post {
             Toast.makeText(this, text.take(120), Toast.LENGTH_LONG).show()
-            // Warm FA/EN hybrid engine (online if device has no Persian TTS)
             voice.speak(text)
             resetInactivityTimer()
         }
