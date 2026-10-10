@@ -15,7 +15,6 @@ import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
@@ -26,38 +25,38 @@ import androidx.core.app.NotificationCompat
 import com.mrfokolaii.aria.agent.AgentBridge
 import com.mrfokolaii.aria.agent.UnoRouterProvider
 import com.mrfokolaii.aria.memory.ChatHistoryStore
+import com.mrfokolaii.aria.voice.AriaVoiceEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Locale
 
-class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
+class AriaOverlayService : Service() {
 
     private var windowManager: WindowManager? = null
     private var floatButton: Button? = null
     private var layoutParams: WindowManager.LayoutParams? = null
-    private var tts: TextToSpeech? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private var isListening = false
     private var isProcessing = false
-    private var ttsReady = false
     private var isHidden = false
+    private var preferEnglishStt = false
 
     private val handler = Handler(Looper.getMainLooper())
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var agentBridge: AgentBridge? = null
     private lateinit var chatStore: ChatHistoryStore
+    private lateinit var voice: AriaVoiceEngine
 
     private val inactivityRunnable = Runnable { hideWidget() }
 
     override fun onCreate() {
         super.onCreate()
         chatStore = ChatHistoryStore(this)
+        voice = AriaVoiceEngine(this).also { it.init() }
         startForegroundNotification()
-        tts = TextToSpeech(this, this)
         initAgentBridge()
         initSpeechRecognizer()
         initFloatingWidget()
@@ -148,6 +147,18 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
                 override fun onError(error: Int) {
                     isListening = false
                     isProcessing = false
+                    // If Persian STT fails, retry once with English
+                    if (!preferEnglishStt &&
+                        (error == SpeechRecognizer.ERROR_NO_MATCH ||
+                                error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+                                error == SpeechRecognizer.ERROR_CLIENT ||
+                                error == SpeechRecognizer.ERROR_SERVER)
+                    ) {
+                        preferEnglishStt = true
+                        updateButton("🎤 EN...", 0xFFFF5252.toInt())
+                        startListeningInternal()
+                        return
+                    }
                     val msg = when (error) {
                         SpeechRecognizer.ERROR_NO_MATCH -> "چیزی نشنیدم، دوباره بگو"
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "زمان تمام شد"
@@ -161,6 +172,7 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
 
                 override fun onResults(results: Bundle?) {
                     isListening = false
+                    preferEnglishStt = false
                     val text = results
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull()?.trim()
@@ -299,16 +311,26 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
             return
         }
         if (isListening || isProcessing) return
+        preferEnglishStt = false
+        startListeningInternal()
+    }
 
+    private fun startListeningInternal() {
         isListening = true
-        updateButton("🎤 گوش می‌دهم...", 0xFFFF5252.toInt())
+        updateButton(
+            if (preferEnglishStt) "🎤 EN..." else "🎤 گوش می‌دهم...",
+            0xFFFF5252.toInt()
+        )
 
+        val lang = if (preferEnglishStt) "en-US" else "fa-IR"
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "fa-IR")
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "fa-IR")
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            // Allow mixed / free-form recognition
+            putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
         }
 
         try {
@@ -326,7 +348,6 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         updateButton("⏳ فکر می‌کنم...", 0xFFFFAB40.toInt())
         Toast.makeText(this, "شما: $text", Toast.LENGTH_SHORT).show()
 
-        // Save to in-app chat only (NOT external Grok / phone storage)
         chatStore.append("user", text, source = "voice")
 
         serviceScope.launch {
@@ -337,7 +358,6 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
                     return@launch
                 }
 
-                // Full chat history so the AI does not forget previous turns
                 val history = chatStore.asHistoryPairs()
 
                 val response = withContext(Dispatchers.IO) {
@@ -366,10 +386,9 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
 
     private fun speak(text: String) {
         handler.post {
-            Toast.makeText(this, text.take(100), Toast.LENGTH_LONG).show()
-            if (ttsReady) {
-                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "aria_utterance")
-            }
+            Toast.makeText(this, text.take(120), Toast.LENGTH_LONG).show()
+            // Warm FA/EN hybrid engine (online if device has no Persian TTS)
+            voice.speak(text)
             resetInactivityTimer()
         }
     }
@@ -377,16 +396,6 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
     private fun resetInactivityTimer() {
         handler.removeCallbacks(inactivityRunnable)
         handler.postDelayed(inactivityRunnable, 40_000)
-    }
-
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val result = tts?.setLanguage(Locale("fa", "IR"))
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                tts?.language = Locale.getDefault()
-            }
-            ttsReady = true
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -405,8 +414,7 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         serviceScope.cancel()
         handler.removeCallbacks(inactivityRunnable)
         speechRecognizer?.destroy()
-        tts?.stop()
-        tts?.shutdown()
+        voice.shutdown()
         if (!isHidden) {
             floatButton?.let {
                 try { windowManager?.removeView(it) } catch (_: Exception) {}
