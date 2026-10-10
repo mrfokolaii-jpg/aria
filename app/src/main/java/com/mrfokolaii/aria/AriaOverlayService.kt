@@ -25,34 +25,42 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.mrfokolaii.aria.agent.AgentBridge
 import com.mrfokolaii.aria.agent.UnoRouterProvider
+import com.mrfokolaii.aria.memory.PersistentMemory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
 
     private var windowManager: WindowManager? = null
     private var floatButton: Button? = null
+    private var layoutParams: WindowManager.LayoutParams? = null
     private var tts: TextToSpeech? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private var isListening = false
     private var isProcessing = false
     private var ttsReady = false
+    private var isHidden = false
 
     private val handler = Handler(Looper.getMainLooper())
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val conversationHistory = mutableListOf<Pair<String, String>>()
-
     private var agentBridge: AgentBridge? = null
+    private lateinit var memory: PersistentMemory
+    private val sessionId = "voice_" + SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
 
-    private val inactivityRunnable = Runnable { minimizeWidget() }
+    /** Auto-hide after 40 seconds of silence (range 30-50s as requested) */
+    private val inactivityRunnable = Runnable { hideWidget() }
 
     override fun onCreate() {
         super.onCreate()
+        memory = PersistentMemory(this)
         startForegroundNotification()
         tts = TextToSpeech(this, this)
         initAgentBridge()
@@ -70,16 +78,23 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
             )
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
-        val pending = PendingIntent.getActivity(
+        val showIntent = Intent(this, AriaOverlayService::class.java).apply {
+            action = ACTION_SHOW
+        }
+        val showPending = PendingIntent.getService(
+            this, 1, showIntent, PendingIntent.FLAG_IMMUTABLE
+        )
+        val chatPending = PendingIntent.getActivity(
             this, 0,
-            Intent(this, MainActivity::class.java),
+            Intent(this, ChatActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
         val notification: Notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle("ARIA فعال است")
-            .setContentText("برای صحبت روی ویجت ضربه بزنید")
+            .setContentText("ضربه = صحبت | نوتیف = نمایش ویجت")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentIntent(pending)
+            .setContentIntent(showPending)
+            .addAction(0, "چت متنی", chatPending)
             .setOngoing(true)
             .build()
         startForeground(1, notification)
@@ -111,7 +126,6 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
                 prefs.getString("custom_model", "") ?: ""
             )
         }
-
         agentBridge = AgentBridge(this, apiKey, endpoint, model)
     }
 
@@ -125,7 +139,6 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
                 override fun onReadyForSpeech(params: Bundle?) {
                     updateButton("🎤 گوش می‌دهم...", 0xFFFF5252.toInt())
                 }
-
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
@@ -155,8 +168,7 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
                     isListening = false
                     val text = results
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull()
-                        ?.trim()
+                        ?.firstOrNull()?.trim()
 
                     if (text.isNullOrBlank()) {
                         isProcessing = false
@@ -164,7 +176,6 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
                         speak("چیزی نشنیدم")
                         return
                     }
-
                     Log.d(TAG, "Recognized: $text")
                     processUserInput(text)
                 }
@@ -182,7 +193,7 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        val params = WindowManager.LayoutParams(
+        layoutParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             layoutFlag,
@@ -202,6 +213,10 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
             textSize = 15f
 
             setOnClickListener {
+                if (isHidden) {
+                    showWidget()
+                    return@setOnClickListener
+                }
                 resetInactivityTimer()
                 if (isListening || isProcessing) return@setOnClickListener
                 startListening()
@@ -214,6 +229,7 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
             var moved = false
 
             setOnTouchListener { _, event ->
+                val params = layoutParams ?: return@setOnTouchListener false
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
                         initialX = params.x
@@ -230,7 +246,9 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
                             moved = true
                             params.x = initialX + dx
                             params.y = initialY + dy
-                            windowManager?.updateViewLayout(floatButton, params)
+                            if (!isHidden) {
+                                windowManager?.updateViewLayout(floatButton, params)
+                            }
                         }
                         true
                     }
@@ -244,13 +262,46 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         }
 
         try {
-            windowManager?.addView(floatButton, params)
+            windowManager?.addView(floatButton, layoutParams)
+            isHidden = false
         } catch (e: Exception) {
             Log.e(TAG, "Failed to add overlay", e)
         }
     }
 
+    private fun hideWidget() {
+        if (isHidden || isListening || isProcessing) return
+        try {
+            floatButton?.let { windowManager?.removeView(it) }
+            isHidden = true
+            Log.d(TAG, "Widget auto-hidden after inactivity")
+        } catch (e: Exception) {
+            Log.w(TAG, "hide failed: ${e.message}")
+        }
+    }
+
+    private fun showWidget() {
+        if (!isHidden) {
+            resetInactivityTimer()
+            return
+        }
+        try {
+            floatButton?.let { btn ->
+                layoutParams?.let { windowManager?.addView(btn, it) }
+            }
+            isHidden = false
+            updateButton("🤖 ARIA", 0xFF00E676.toInt())
+            resetInactivityTimer()
+            Log.d(TAG, "Widget shown again")
+        } catch (e: Exception) {
+            Log.e(TAG, "show failed", e)
+            // Recreate if view was lost
+            initFloatingWidget()
+        }
+    }
+
     private fun startListening() {
+        showWidget()
         if (speechRecognizer == null) {
             speak("تشخیص گفتار در دسترس نیست")
             return
@@ -283,12 +334,21 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         updateButton("⏳ فکر می‌کنم...", 0xFFFFAB40.toInt())
         Toast.makeText(this, "شما: $text", Toast.LENGTH_SHORT).show()
 
+        // Persist user message
+        memory.appendConversation(sessionId, "user", text)
+
         serviceScope.launch {
             try {
                 val bridge = agentBridge
                 if (bridge == null) {
                     speak("اتصال به هوش مصنوعی برقرار نیست. تنظیمات را بررسی کنید.")
                     return@launch
+                }
+
+                // Auto-save notes on request
+                val lower = text.lowercase()
+                if (lower.contains("یادداشت") || lower.contains("نکته") || lower.contains("ذخیره")) {
+                    memory.saveNote("voice_${System.currentTimeMillis()}", text, listOf("voice"))
                 }
 
                 val response = withContext(Dispatchers.IO) {
@@ -302,6 +362,7 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
                     conversationHistory.removeAt(0)
                 }
 
+                memory.appendConversation(sessionId, "assistant", response.text)
                 speak(response.text)
             } catch (e: Exception) {
                 Log.e(TAG, "processUserInput failed", e)
@@ -309,6 +370,7 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
             } finally {
                 isProcessing = false
                 updateButton("🤖 ARIA", 0xFF00E676.toInt())
+                resetInactivityTimer()
             }
         }
     }
@@ -322,7 +384,7 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
 
     private fun speak(text: String) {
         handler.post {
-            Toast.makeText(this, text.take(80), Toast.LENGTH_LONG).show()
+            Toast.makeText(this, text.take(100), Toast.LENGTH_LONG).show()
             if (ttsReady) {
                 tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "aria_utterance")
             }
@@ -332,11 +394,8 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
 
     private fun resetInactivityTimer() {
         handler.removeCallbacks(inactivityRunnable)
-        handler.postDelayed(inactivityRunnable, 60_000)
-    }
-
-    private fun minimizeWidget() {
-        updateButton("💤 ARIA", 0xFF888888.toInt())
+        // 40 seconds in the requested 30-50s range
+        handler.postDelayed(inactivityRunnable, 40_000)
     }
 
     override fun onInit(status: Int) {
@@ -350,8 +409,11 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Reload bridge if settings changed
-        initAgentBridge()
+        when (intent?.action) {
+            ACTION_SHOW -> showWidget()
+            ACTION_HIDE -> hideWidget()
+            else -> initAgentBridge()
+        }
         return START_STICKY
     }
 
@@ -364,10 +426,16 @@ class AriaOverlayService : Service(), TextToSpeech.OnInitListener {
         speechRecognizer?.destroy()
         tts?.stop()
         tts?.shutdown()
-        floatButton?.let { windowManager?.removeView(it) }
+        if (!isHidden) {
+            floatButton?.let {
+                try { windowManager?.removeView(it) } catch (_: Exception) {}
+            }
+        }
     }
 
     companion object {
         private const val TAG = "AriaOverlayService"
+        const val ACTION_SHOW = "com.mrfokolaii.aria.SHOW_WIDGET"
+        const val ACTION_HIDE = "com.mrfokolaii.aria.HIDE_WIDGET"
     }
 }
