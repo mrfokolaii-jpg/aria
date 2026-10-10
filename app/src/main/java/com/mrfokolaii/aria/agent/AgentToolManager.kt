@@ -79,6 +79,8 @@ class AgentToolManager(private val context: android.content.Context? = null) {
 
     fun getRouter(): ToolRouter = router
 
+    fun listAllTools(): List<AgentTool> = registry.getAllTools()
+
     suspend fun runDoctorCheck(): DoctorReport = withContext(Dispatchers.IO) {
         val healthResults = registry.checkAllHealth()
         val healthy = healthResults.filter { it.value.isHealthy }
