@@ -20,11 +20,7 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Fully offline Persian TTS using a Piper ONNX model stored inside the app sandbox.
- *
- * First launch (or via settings): download model once while online.
- * Afterwards: synthesize without network.
- *
- * Model: MahtaFetrat/Mana-Persian-Piper (fa_IR-mana-medium)
+ * Download once while online; afterwards works offline.
  */
 class OfflinePersianTts(private val context: Context) {
 
@@ -53,17 +49,13 @@ class OfflinePersianTts(private val context: Context) {
 
     fun modelPath(): String = modelDir.absolutePath
 
-    /** Load model into memory (call after download or on app start). */
     @Synchronized
     fun prepare(): Boolean {
         if (ready && session != null) return true
         if (!isModelDownloaded()) return false
         return try {
             val json = JSONObject(configFile.readText())
-            sampleRate = json.optInt("audio", JSONObject()).let {
-                // piper config: audio.sample_rate
-                json.optJSONObject("audio")?.optInt("sample_rate", 22050) ?: 22050
-            }
+            sampleRate = json.optJSONObject("audio")?.optInt("sample_rate", 22050) ?: 22050
             val infer = json.optJSONObject("inference")
             noiseScale = infer?.optDouble("noise_scale", 0.667)?.toFloat() ?: 0.667f
             lengthScale = infer?.optDouble("length_scale", 1.0)?.toFloat() ?: 1.0f
@@ -86,9 +78,11 @@ class OfflinePersianTts(private val context: Context) {
             phonemeIdMap = map
 
             env = OrtEnvironment.getEnvironment()
-            val opts = OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(2)
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            val opts = OrtSession.SessionOptions()
+            try {
+                opts.setIntraOpNumThreads(2)
+            } catch (_: Exception) {
+                // optional
             }
             session = env!!.createSession(modelFile.absolutePath, opts)
             ready = true
@@ -101,17 +95,12 @@ class OfflinePersianTts(private val context: Context) {
         }
     }
 
-    /**
-     * Download model files (needs internet once). Returns true on success.
-     */
     fun downloadModel(onProgress: ((String) -> Unit)? = null): Boolean {
         return try {
             onProgress?.invoke("در حال دانلود مدل فارسی...")
-            // HuggingFace resolve URLs for Mana Persian Piper
             val base =
                 "https://huggingface.co/MahtaFetrat/Mana-Persian-Piper/resolve/main"
             downloadTo("$base/fa_IR-mana-medium.onnx", modelFile, onProgress)
-            // config may be named differently — try common names
             val configUrls = listOf(
                 "$base/fa_IR-mana-medium.onnx.json",
                 "$base/config.json",
@@ -125,10 +114,10 @@ class OfflinePersianTts(private val context: Context) {
                         configOk = true
                         break
                     }
-                } catch (_: Exception) {}
+                } catch (_: Exception) {
+                }
             }
             if (!configOk) {
-                // Minimal fallback config so prepare() can still attempt
                 configFile.writeText(
                     """{"audio":{"sample_rate":22050},"inference":{"noise_scale":0.667,"length_scale":1.0,"noise_w":0.8},"phoneme_id_map":{}}"""
                 )
@@ -171,9 +160,6 @@ class OfflinePersianTts(private val context: Context) {
         Log.i(TAG, "Saved ${dest.name} (${dest.length()} bytes)")
     }
 
-    /**
-     * Synthesize Persian text to a WAV file offline. Returns file or null.
-     */
     @Synchronized
     fun synthesizeToFile(text: String): File? {
         if (!prepare()) return null
@@ -184,13 +170,9 @@ class OfflinePersianTts(private val context: Context) {
             val ids = textToPhonemeIds(text)
             if (ids.isEmpty()) return null
 
-            val inputName = sess.inputNames.firstOrNull() ?: "input"
-            // Piper typically: input [1, N] int64, input_lengths [1] int64, scales [3] float
             val names = sess.inputNames.toList()
-
-            val tensors = mutableMapOf<String, OnnxTensor>()
+            val tensors = HashMap<String, OnnxTensor>()
             try {
-                // sequence
                 val seq = LongArray(ids.size) { ids[it].toLong() }
                 val shape = longArrayOf(1, seq.size.toLong())
                 tensors[names.getOrElse(0) { "input" }] =
@@ -214,16 +196,21 @@ class OfflinePersianTts(private val context: Context) {
                         )
                 }
 
-                val results = sess.run(tensors)
-                results.use { result ->
-                    val value = result.get(0).value
+                sess.run(tensors).use { result ->
+                    val first = result.get(0)
+                    val value = first.value
                     val audio = flattenAudio(value) ?: return null
                     val out = File(context.cacheDir, "fa_tts_${System.currentTimeMillis()}.wav")
                     writeWav(out, audio, sampleRate)
                     out
                 }
             } finally {
-                tensors.values.forEach { it.close() }
+                for (t in tensors.values) {
+                    try {
+                        t.close()
+                    } catch (_: Exception) {
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "synthesize failed", e)
@@ -248,11 +235,10 @@ class OfflinePersianTts(private val context: Context) {
     }
 
     private fun textToPhonemeIds(text: String): IntArray {
-        // Use phoneme_id_map when available; otherwise map characters + pad tokens
         val bos = phonemeIdMap["^"] ?: phonemeIdMap["<bos>"] ?: 1
         val eos = phonemeIdMap["$"] ?: phonemeIdMap["<eos>"] ?: 2
         val pad = phonemeIdMap["_"] ?: phonemeIdMap["<pad>"] ?: 0
-        val ids = mutableListOf<Int>()
+        val ids = ArrayList<Int>()
         ids.add(bos)
         for (ch in text.trim()) {
             val s = ch.toString()
@@ -260,7 +246,6 @@ class OfflinePersianTts(private val context: Context) {
                 ?: phonemeIdMap[ch.lowercaseChar().toString()]
                 ?: pad
             ids.add(id)
-            // Piper often expects pad between phonemes
             ids.add(pad)
         }
         ids.add(eos)
@@ -271,12 +256,11 @@ class OfflinePersianTts(private val context: Context) {
         return when (value) {
             is FloatArray -> value
             is Array<*> -> {
-                // nested arrays [1][1][N] or [1][N]
-                val flat = mutableListOf<Float>()
+                val flat = ArrayList<Float>()
                 fun walk(v: Any?) {
                     when (v) {
-                        is FloatArray -> v.forEach { flat.add(it) }
-                        is Array<*> -> v.forEach { walk(it) }
+                        is FloatArray -> for (x in v) flat.add(x)
+                        is Array<*> -> for (item in v) walk(item)
                         is Float -> flat.add(v)
                         is Double -> flat.add(v.toFloat())
                     }
@@ -297,8 +281,8 @@ class OfflinePersianTts(private val context: Context) {
         buf.put("WAVE".toByteArray())
         buf.put("fmt ".toByteArray())
         buf.putInt(16)
-        buf.putShort(1) // PCM
-        buf.putShort(1) // mono
+        buf.putShort(1)
+        buf.putShort(1)
         buf.putInt(sr)
         buf.putInt(sr * 2)
         buf.putShort(2)
@@ -325,18 +309,29 @@ class OfflinePersianTts(private val context: Context) {
                 )
                 setDataSource(file.absolutePath)
                 setOnCompletionListener {
-                    synchronized(lock) { done = true; lock.notifyAll() }
+                    synchronized(lock) {
+                        done = true
+                        lock.notifyAll()
+                    }
                     release()
                 }
                 setOnErrorListener { _, _, _ ->
-                    synchronized(lock) { done = true; lock.notifyAll() }
+                    synchronized(lock) {
+                        done = true
+                        lock.notifyAll()
+                    }
                     true
                 }
                 prepare()
                 start()
             }
             synchronized(lock) {
-                if (!done) try { lock.wait(120_000) } catch (_: InterruptedException) {}
+                if (!done) {
+                    try {
+                        lock.wait(120_000)
+                    } catch (_: InterruptedException) {
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "play failed", e)
@@ -344,7 +339,10 @@ class OfflinePersianTts(private val context: Context) {
     }
 
     fun release() {
-        try { session?.close() } catch (_: Exception) {}
+        try {
+            session?.close()
+        } catch (_: Exception) {
+        }
         session = null
         ready = false
     }
