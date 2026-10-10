@@ -11,3 +11,19 @@ local.properties
 .DS_Store
 __pycache__/
 *.pyc
+
+# Backup files
+*.bak
+*.bak-*
+*.fixbak
+
+# Built APKs and binaries (keep out of git)
+*.apk
+aapt2-binary
+aapt2-native.sh
+aapt2-wrapper.sh
+aria-debug-apk/
+aria4-artifact/
+
+# Python artifacts in root
+*.pyo
