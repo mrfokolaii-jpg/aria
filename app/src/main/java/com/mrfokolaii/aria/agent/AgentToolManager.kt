@@ -79,7 +79,16 @@ class AgentToolManager(private val context: android.content.Context? = null) {
 
     fun getRouter(): ToolRouter = router
 
-    fun listAllTools(): List<AgentTool> = registry.getAllTools()
+    /** Shape expected by AgentBridge.listTools() */
+    fun listAllTools(): List<Map<String, Any>> {
+        return registry.getAllTools().map { tool ->
+            mapOf(
+                "name" to tool.name,
+                "description" to tool.description,
+                "category" to tool.category.name
+            )
+        }
+    }
 
     suspend fun runDoctorCheck(): DoctorReport = withContext(Dispatchers.IO) {
         val healthResults = registry.checkAllHealth()
