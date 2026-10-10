@@ -1,7 +1,10 @@
-name: Build ARIA APK
+name: Build APK (manual)
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -14,11 +17,27 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - uses: android-actions/setup-android@v3
 
-      - run: chmod +x gradlew
-      - run: ./gradlew assembleDebug --no-daemon
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
           name: aria-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: manual-${{ github.run_number }}
+          name: "ARIA APK (manual) ${{ github.run_number }}"
+          files: app/build/outputs/apk/debug/*.apk
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
