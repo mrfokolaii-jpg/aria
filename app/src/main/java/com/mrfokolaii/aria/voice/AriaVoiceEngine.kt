@@ -18,12 +18,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * TTS priority:
- * 1) System TTS — preferably installed Sherpa/Piper FA engine (com.k2fsa.sherpa.onnx.tts.engine)
- * 2) Any other system FA/EN engine
- * 3) Online Google TTS only when network is available
- *
- * The in-app ONNX Piper path is kept only as optional prepare helper; speaking prefers system engines
- * so a separately installed sherpa APK is used automatically.
+ * 1) System TTS — preferably installed Sherpa/Piper FA (com.k2fsa.sherpa.onnx.tts.engine)
+ * 2) Default system engine
+ * 3) Online Google TTS when network available
  */
 class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListener {
 
@@ -53,31 +50,12 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
 
     fun offlinePersian(): OfflinePersianTts = offlineFa
 
-    /** Package of installed Sherpa/Piper FA engine if present. */
     fun sherpaEnginePackage(): String? = findPreferredEngine()
 
-    fun hasSherpaEngine(): Boolean = findPreferredEngine() != null
+    fun hasSherpaEngine(): Boolean = isPackageInstalled(SHERPA_PKG)
 
-    private fun findPreferredEngine(): String? {
-        return try {
-            val engines = TextToSpeech(context, null).engines ?: emptyList()
-            // Temporary TTS only to list engines — shutdown immediately
-            val list = engines.map { it.name }
-            Log.d(TAG, "Available TTS engines: $list")
-            val match = engines.firstOrNull { eng ->
-                val n = eng.name.lowercase()
-                n.contains("sherpa") || n.contains("piper") || n.contains("k2fsa") ||
-                    n == SHERPA_PKG
-            }?.name
-            // Also accept if package is installed even when not default
-            if (match != null) match
-            else if (isPackageInstalled(SHERPA_PKG)) SHERPA_PKG
-            else null
-        } catch (e: Exception) {
-            Log.w(TAG, "engine probe failed: ${e.message}")
-            if (isPackageInstalled(SHERPA_PKG)) SHERPA_PKG else null
-        }
-    }
+    private fun findPreferredEngine(): String? =
+        if (isPackageInstalled(SHERPA_PKG)) SHERPA_PKG else null
 
     private fun isPackageInstalled(pkg: String): Boolean = try {
         context.packageManager.getPackageInfo(pkg, 0)
@@ -89,7 +67,6 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     override fun onInit(status: Int) {
         if (status != TextToSpeech.SUCCESS) {
             systemReady = false
-            // Retry with default engine if preferred failed
             if (preferredEngine != null) {
                 preferredEngine = null
                 tts = TextToSpeech(context, this)
@@ -103,10 +80,8 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         val fa = tts?.setLanguage(Locale("fa", "IR"))
         systemFaOk = fa == TextToSpeech.LANG_AVAILABLE ||
                 fa == TextToSpeech.LANG_COUNTRY_AVAILABLE ||
-                fa == TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE ||
-                fa == TextToSpeech.LANG_AVAILABLE // sherpa often reports available for fa
+                fa == TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE
 
-        // Some engines report LANG_MISSING_DATA but still speak FA — treat non-ERROR as ok when sherpa
         if (!systemFaOk && preferredEngine != null) {
             systemFaOk = fa != TextToSpeech.LANG_NOT_SUPPORTED
         }
@@ -160,17 +135,11 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     private fun speakSegment(text: String, lang: String, onSegmentDone: () -> Unit) {
         val online = NetworkUtils.isOnline(context)
 
-        // 1) System TTS (Sherpa/Piper FA or any installed engine)
         if (systemReady) {
-            val canFa = lang == "fa" && (systemFaOk || preferredEngine != null)
-            val canEn = lang == "en" && systemEnOk
-            if (canFa || canEn || systemReady) {
-                speakSystem(text, lang, allowOnlineFallback = online, onDone = onSegmentDone)
-                return
-            }
+            speakSystem(text, lang, allowOnlineFallback = online, onDone = onSegmentDone)
+            return
         }
 
-        // 2) Online only
         if (online) {
             speakOnline(text, lang, onSegmentDone)
             return
@@ -284,7 +253,6 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     }
 
     private fun splitMixedLanguage(text: String): List<Pair<String, String>> {
-        // Simple: if mostly Persian chars -> fa else en
         val faChars = text.count { it in '\u0600'..'\u06FF' }
         val lang = if (faChars >= text.length / 4) "fa" else "en"
         return listOf(text to lang)
