@@ -16,6 +16,9 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import com.mrfokolaii.aria.agent.AgentBridge
 import com.mrfokolaii.aria.agent.UnoRouterProvider
 import com.mrfokolaii.aria.memory.ChatHistoryStore
@@ -61,7 +64,6 @@ class ChatActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Refresh so voice messages appear when returning from widget
         reloadBubbles()
     }
 
@@ -69,11 +71,6 @@ class ChatActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("aria", MODE_PRIVATE)
         val provider = prefs.getString("active_provider", "groq") ?: "groq"
         val (key, endpoint, model) = when (provider) {
-            "groq" -> Triple(
-                prefs.getString("groq_api_key", "") ?: "",
-                UnoRouterProvider.GROQ_BASE,
-                prefs.getString("groq_model", "llama-3.3-70b-versatile") ?: "llama-3.3-70b-versatile"
-            )
             "openrouter" -> Triple(
                 prefs.getString("openrouter_api_key", "") ?: "",
                 UnoRouterProvider.OPENROUTER_BASE,
@@ -84,46 +81,59 @@ class ChatActivity : AppCompatActivity() {
                 UnoRouterProvider.XAI_BASE,
                 prefs.getString("xai_model", "grok-3") ?: "grok-3"
             )
-            else -> Triple(
+            "custom" -> Triple(
                 prefs.getString("custom_api_key", "") ?: "",
                 prefs.getString("custom_api_url", "") ?: "",
                 prefs.getString("custom_model", "") ?: ""
+            )
+            else -> Triple(
+                prefs.getString("groq_api_key", "") ?: "",
+                UnoRouterProvider.GROQ_BASE,
+                prefs.getString("groq_model", "openai/gpt-oss-20b") ?: "openai/gpt-oss-20b"
             )
         }
         agentBridge = AgentBridge(this, key, endpoint, model)
     }
 
     private fun buildUi() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.parseColor("#0F0F1A")
+        window.navigationBarColor = Color.parseColor("#0F0F1A")
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#0D0D0D"))
+            setBackgroundColor(Color.parseColor("#0F0F1A"))
         }
 
         val toolbar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(Color.parseColor("#1A1A2E"))
-            setPadding(24, 28, 24, 20)
+            setBackgroundColor(Color.parseColor("#16162A"))
+            setPadding(20, 16, 20, 16)
             gravity = Gravity.CENTER_VERTICAL
         }
         toolbar.addView(TextView(this).apply {
-            text = "💬 چت آریا (حافظه دائمی)"
-            textSize = 16f
+            text = "چت آریا"
+            textSize = 17f
             setTextColor(Color.WHITE)
             setTypeface(null, Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
         toolbar.addView(Button(this).apply {
-            text = "پاک کردن"
-            textSize = 11f
+            text = "پاک"
+            textSize = 12f
+            setBackgroundColor(Color.parseColor("#2A2A40"))
+            setTextColor(Color.WHITE)
             setOnClickListener {
                 chatStore.clear()
                 reloadBubbles()
-                addBubble("assistant", "تاریخچه پاک شد. از صفر شروع می‌کنیم.", "chat")
+                addBubble("assistant", "تاریخچه پاک شد.", "chat")
             }
         })
         toolbar.addView(Button(this).apply {
             text = "⚙"
             textSize = 14f
+            setBackgroundColor(Color.parseColor("#2A2A40"))
+            setTextColor(Color.WHITE)
             setOnClickListener {
                 startActivity(Intent(this@ChatActivity, MainActivity::class.java))
             }
@@ -134,24 +144,27 @@ class ChatActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
             )
+            isFillViewport = true
         }
         chatContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(16, 16, 16, 16)
+            setPadding(14, 14, 14, 14)
         }
         scrollView.addView(chatContainer)
         root.addView(scrollView)
 
         val inputBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(Color.parseColor("#1A1A2E"))
-            setPadding(12, 12, 12, 12)
+            setBackgroundColor(Color.parseColor("#16162A"))
+            setPadding(12, 14, 12, 14)
             gravity = Gravity.CENTER_VERTICAL
         }
 
         inputBar.addView(Button(this).apply {
             text = "📎"
             textSize = 16f
+            setBackgroundColor(Color.parseColor("#2A2A40"))
+            setTextColor(Color.WHITE)
             setOnClickListener { filePicker.launch("*/*") }
         })
 
@@ -159,9 +172,10 @@ class ChatActivity : AppCompatActivity() {
             hint = "پیام خود را بنویسید..."
             setHintTextColor(Color.GRAY)
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#2A2A3E"))
-            setPadding(20, 16, 20, 16)
-            maxLines = 4
+            setBackgroundColor(Color.parseColor("#252540"))
+            setPadding(22, 18, 22, 18)
+            minHeight = 52
+            maxLines = 5
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = 8
                 marginEnd = 8
@@ -172,10 +186,20 @@ class ChatActivity : AppCompatActivity() {
         inputBar.addView(Button(this).apply {
             text = "➤"
             textSize = 18f
+            setBackgroundColor(Color.parseColor("#00C853"))
+            setTextColor(Color.WHITE)
             setOnClickListener { sendMessage() }
         })
 
         root.addView(inputBar)
+
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            v.setPadding(0, bars.top, 0, maxOf(bars.bottom, ime.bottom))
+            insets
+        }
+
         setContentView(root)
     }
 
@@ -184,16 +208,16 @@ class ChatActivity : AppCompatActivity() {
         if (chatStore.messageCount() == 0) {
             addBubble(
                 "assistant",
-                "سلام! من آریا هستم. مکالمه‌های صوتی و متنی اینجا ذخیره می‌شوند و فراموش نمی‌کنم. (فقط داخل اپ — نه روی حافظه خارجی)",
+                "سلام! من آریا هستم. بنویس یا از ویجت صحبت کن.",
                 "chat"
             )
         }
     }
 
     private fun reloadBubbles() {
+        if (!::chatContainer.isInitialized) return
         chatContainer.removeAllViews()
-        val messages = chatStore.loadAll()
-        messages.forEach { msg ->
+        chatStore.loadAll().forEach { msg ->
             addBubble(msg.role, msg.text, msg.source, scroll = false)
         }
         scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
@@ -201,82 +225,58 @@ class ChatActivity : AppCompatActivity() {
 
     private fun sendMessage() {
         if (isSending) return
-        var text = inputField.text.toString().trim()
+        val text = inputField.text?.toString()?.trim().orEmpty()
         val fileUri = pendingFileUri
+        if (text.isEmpty() && fileUri == null) return
 
-        if (text.isBlank() && fileUri == null) return
-
-        if (fileUri != null) {
-            val name = fileUri.lastPathSegment ?: "فایل"
-            text = if (text.isBlank()) "[فایل پیوست: $name]" else "$text\n[فایل پیوست: $name]"
-            pendingFileUri = null
-            inputField.hint = "پیام خود را بنویسید..."
+        val display = buildString {
+            if (text.isNotEmpty()) append(text)
+            if (fileUri != null) {
+                if (isNotEmpty()) append("\n")
+                append("[فایل: ${fileUri.lastPathSegment}]")
+            }
         }
-
         inputField.setText("")
-        chatStore.append("user", text, source = "chat")
-        addBubble("user", text, "chat")
+        inputField.hint = "پیام خود را بنویسید..."
+        pendingFileUri = null
 
+        chatStore.append("user", display, "chat")
+        addBubble("user", display, "chat")
+        val thinking = addBubble("assistant", "...", "chat")
         isSending = true
-        val thinking = addBubble("assistant", "در حال فکر کردن...", "chat")
 
         scope.launch {
             try {
-                val bridge = agentBridge
-                if (bridge == null) {
-                    updateBubble(thinking, "اتصال به هوش مصنوعی برقرار نیست. از تنظیمات کلید API را وارد کنید.")
-                    return@launch
-                }
-
-                val lower = text.lowercase()
-                if (lower.contains("یادداشت") || lower.contains("نکته") || lower.contains("ذخیره کن") || lower.contains("note")) {
-                    knowledgeMemory.saveNote("auto_note_${System.currentTimeMillis()}", text, listOf("user_request"))
-                }
-
-                // Full history — AI does not forget previous messages
-                val history = chatStore.asHistoryPairs()
-
+                val history = chatStore.loadAll().map { it.role to it.text }.takeLast(20)
                 val response = withContext(Dispatchers.IO) {
-                    bridge.processWithAgentTools(text, history)
+                    agentBridge?.processWithAgentTools(display, history)
+                        ?: com.mrfokolaii.aria.agent.AgentResponse("پل ارتباطی آماده نیست.")
                 }
-
-                response.toolResult?.data?.let { catalogFromToolData(it) }
-
-                chatStore.append("assistant", response.text, source = "chat")
+                chatStore.append("assistant", response.text, "chat")
                 updateBubble(thinking, response.text)
+                response.toolResult?.data?.let { saveKnowledge(it) }
             } catch (e: Exception) {
-                updateBubble(thinking, "خطا: ${e.localizedMessage}")
+                val err = "خطا: ${e.message}"
+                chatStore.append("assistant", err, "chat")
+                updateBubble(thinking, err)
             } finally {
                 isSending = false
             }
         }
     }
 
-    private fun catalogFromToolData(data: Any) {
+    private fun saveKnowledge(data: Any?) {
         try {
             when (data) {
                 is Map<*, *> -> {
                     val url = data["url"]?.toString()
-                    val content = data["content"]?.toString() ?: ""
-                    if (url != null && url.startsWith("http")) {
+                    if (url != null) {
                         knowledgeMemory.saveSite(
                             url = url,
                             title = data["title"]?.toString() ?: url,
-                            categories = listOf("web"),
-                            features = listOf("browsed"),
-                            summary = content.take(300)
-                        )
-                    }
-                    @Suppress("UNCHECKED_CAST")
-                    val results = data["results"] as? List<Map<String, Any>>
-                    results?.forEach { item ->
-                        val u = item["url"]?.toString() ?: return@forEach
-                        knowledgeMemory.saveSite(
-                            url = u,
-                            title = item["title"]?.toString() ?: item["name"]?.toString() ?: u,
-                            categories = listOf(item["language"]?.toString() ?: "search"),
-                            features = listOf("search_result"),
-                            summary = item["description"]?.toString() ?: item["snippet"]?.toString() ?: ""
+                            categories = listOf("chat"),
+                            features = listOf("linked"),
+                            summary = data["description"]?.toString() ?: data["snippet"]?.toString() ?: ""
                         )
                     }
                 }
