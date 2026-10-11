@@ -18,9 +18,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Uses the **phone default TTS engine** (whatever user picks in system settings).
- * Not bound to a fixed package name — change voice in phone settings and app follows.
- *
+ * Uses the phone default TTS engine (whatever user picks in system settings).
  * Priority: System TTS → Online Google TTS (if online).
  */
 class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListener {
@@ -37,7 +35,6 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         .build()
 
     fun init() {
-        // Always default system engine — user can switch voice in phone TTS settings
         tts = TextToSpeech(context, this)
     }
 
@@ -61,7 +58,6 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         systemReady = true
         tts?.setSpeechRate(0.95f)
         tts?.setPitch(1.05f)
-        // Prefer Persian if engine supports it; otherwise keep default
         val fa = tts?.setLanguage(Locale("fa", "IR"))
         if (fa == TextToSpeech.LANG_NOT_SUPPORTED) {
             tts?.language = Locale.getDefault()
@@ -130,7 +126,7 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         when (lang) {
             "fa" -> engine.language = Locale("fa", "IR")
             "en" -> engine.language = Locale.US
-            else -> { /* keep current */ }
+            else -> { }
         }
         engine.setSpeechRate(0.95f)
         engine.setPitch(1.05f)
@@ -243,23 +239,24 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         const val SHERPA_ENGINES_URL = "https://k2-fsa.github.io/sherpa/onnx/tts/apk-engine.html"
 
         /**
-         * Remove symbols/punctuation so TTS does not say "star", "parenthesis", etc.
-         * Keeps Persian/Arabic letters, Latin letters, digits, spaces, and basic Persian punctuation.
+         * Keep letters (FA/EN), digits, spaces. Drop stars, parentheses, math, currency, etc.
          */
         fun sanitizeForSpeech(raw: String): String {
-            // Strip markdown-ish and decorative symbols; keep readable text
-            var s = raw
-            // Common emoji / stars / bullets
-            s = s.replace(Regex("[*⭐✦✧✩✪✫✬✭✮✯✰∗﹡＊•●○◆◇■□▪▫►◄▶◀✓✔︎✅❌➕➖✖➗="']+"), " ")
-            // Math & currency & special
-            s = s.replace(Regex("[+\\-*/()\\[\\]{}<>|\\\\^~`@#_$%&=±×÷√π∆§™®©₤¥¢€£°_]+"), " ")
-            // Persian/Arabic decorative and punctuation that sounds bad when read aloud
-            s = s.replace(Regex("[«»״׳٪٫٬،؛؟…!!:;,./]+"), " ")
-            // Zero-width and control
-            s = s.replace(Regex("[\\u200c\\u200f\\u202a-\\u202e\\u2060\\ufeff]+"), " ")
-            // Collapse whitespace
-            s = s.replace(Regex("\\s+"), " ").trim()
-            return s
+            val sb = StringBuilder(raw.length)
+            for (ch in raw) {
+                val keep = when {
+                    ch.isLetterOrDigit() -> true
+                    ch.isWhitespace() -> true
+                    ch in '\u0600'..'\u06FF' -> true // Arabic/Persian block (letters already covered mostly)
+                    ch in '\u0750'..'\u077F' -> true
+                    ch in '\uFB50'..'\uFDFF' -> true
+                    ch in '\uFE70'..'\uFEFF' -> true
+                    ch == '\u200c' -> true // ZWNJ useful in Persian words
+                    else -> false
+                }
+                if (keep) sb.append(ch) else sb.append(' ')
+            }
+            return sb.toString().replace(Regex("\\s+"), " ").trim()
         }
 
         fun openSystemTtsSettings(context: Context) {
