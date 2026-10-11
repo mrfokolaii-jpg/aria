@@ -2,14 +2,12 @@ package com.mrfokolaii.aria
 
 import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
-import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -136,9 +134,40 @@ class MainActivity : AppCompatActivity() {
         })
         root.addView(actions)
 
-        // System / Sherpa offline TTS
+        // Widget near top
         root.addView(TextView(this).apply {
-            text = "صدای فارسی آفلاین"
+            text = "ویجت"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setPadding(0, 16, 0, 8)
+        })
+        widgetSwitch = Switch(this).apply {
+            text = "ویجت شناور روشن/خاموش"
+            setTextColor(Color.WHITE)
+            isChecked = prefs.getBoolean("floating_widget_enabled", true)
+            setOnCheckedChangeListener { _, enabled ->
+                saveFields()
+                prefs.edit().putBoolean("floating_widget_enabled", enabled).apply()
+                if (enabled) ensureRunPermissions()
+                else stopService(Intent(this@MainActivity, AriaOverlayService::class.java))
+            }
+        }
+        root.addView(widgetSwitch)
+        root.addView(Button(this).apply {
+            text = "ذخیره و اجرای ویجت"
+            setBackgroundColor(Color.parseColor("#00C853"))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                saveFields()
+                prefs.edit().putBoolean("floating_widget_enabled", true).apply()
+                widgetSwitch.isChecked = true
+                ensureRunPermissions()
+            }
+        })
+
+        // TTS — follows phone default engine
+        root.addView(TextView(this).apply {
+            text = "صدای فارسی / TTS"
             textSize = 16f
             setTextColor(Color.WHITE)
             setPadding(0, 20, 0, 8)
@@ -149,22 +178,31 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) { false }
         offlineTtsStatus = TextView(this).apply {
             text = if (sherpaInstalled)
-                "موتور Sherpa/Piper فارسی نصب است — اپ از آن استفاده می‌کند"
+                "Sherpa نصب است. اپ از موتور پیش‌فرض TTS گوشی استفاده می‌کند."
             else
-                "موتور Sherpa نصب نیست. APK فارسی Piper را نصب کنید و در تنظیمات TTS گوشی موتور پیش‌فرض کنید."
+                "موتور Sherpa اختیاری است. هر موتور TTS که در تنظیمات گوشی بگذارید، اپ همان را می‌خواند."
             textSize = 12f
             setTextColor(if (sherpaInstalled) Color.parseColor("#00E676") else Color.parseColor("#FFAB40"))
             setPadding(0, 0, 0, 8)
         }
         root.addView(offlineTtsStatus)
-        root.addView(Button(this).apply {
-            text = "تنظیمات صدای گوشی (TTS)"
+
+        val ttsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        ttsRow.addView(Button(this).apply {
+            text = "تنظیمات TTS گوشی"
             setBackgroundColor(Color.parseColor("#2A2A40"))
             setTextColor(Color.WHITE)
             setOnClickListener { AriaVoiceEngine.openSystemTtsSettings(this@MainActivity) }
         })
+        ttsRow.addView(Button(this).apply {
+            text = "دانلود صداهای Sherpa"
+            setBackgroundColor(Color.parseColor("#1565C0"))
+            setTextColor(Color.WHITE)
+            setOnClickListener { AriaVoiceEngine.openSherpaEnginesPage(this@MainActivity) }
+        })
+        root.addView(ttsRow)
         root.addView(TextView(this).apply {
-            text = "اگر صدا درست نیست: تنظیمات گوشی → زبان و ورودی → خروجی گفتار → موتور Sherpa را انتخاب کنید."
+            text = "صدا وابسته به نام فایل نیست: از تنظیمات TTS گوشی موتور را عوض کنید، اپ همان را استفاده می‌کند. دکمه آبی لیست موتورهای Sherpa را باز می‌کند."
             textSize = 11f
             setTextColor(Color.GRAY)
             setPadding(0, 6, 0, 14)
@@ -227,36 +265,6 @@ class MainActivity : AppCompatActivity() {
         })
         customStatus = statusView(prefs.getBoolean("custom_test_ok", false))
         customLayout.addView(customStatus)
-
-        root.addView(TextView(this).apply {
-            text = "ویجت"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            setPadding(0, 16, 0, 8)
-        })
-        widgetSwitch = Switch(this).apply {
-            text = "ویجت شناور روشن/خاموش"
-            setTextColor(Color.WHITE)
-            isChecked = prefs.getBoolean("floating_widget_enabled", true)
-            setOnCheckedChangeListener { _, enabled ->
-                saveFields()
-                prefs.edit().putBoolean("floating_widget_enabled", enabled).apply()
-                if (enabled) ensureRunPermissions()
-                else stopService(Intent(this@MainActivity, AriaOverlayService::class.java))
-            }
-        }
-        root.addView(widgetSwitch)
-        root.addView(Button(this).apply {
-            text = "ذخیره و اجرای ویجت"
-            setBackgroundColor(Color.parseColor("#00C853"))
-            setTextColor(Color.WHITE)
-            setOnClickListener {
-                saveFields()
-                prefs.edit().putBoolean("floating_widget_enabled", true).apply()
-                widgetSwitch.isChecked = true
-                ensureRunPermissions()
-            }
-        })
 
         setContentView(scroll)
     }
