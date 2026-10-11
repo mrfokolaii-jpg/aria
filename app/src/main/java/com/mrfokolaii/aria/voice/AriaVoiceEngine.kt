@@ -1,7 +1,7 @@
 package com.mrfokolaii.aria.voice
 
 import android.content.Context
-import android.media.AudioAttributes
+import android.content.Intent
 import android.media.MediaPlayer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -17,10 +17,13 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Hybrid TTS priority:
- * 1) Offline neural Persian (Piper ONNX inside app) — no internet
- * 2) System TTS (FA/EN if installed)
- * 3) Online TTS only if network available
+ * TTS priority:
+ * 1) System TTS — preferably installed Sherpa/Piper FA engine (com.k2fsa.sherpa.onnx.tts.engine)
+ * 2) Any other system FA/EN engine
+ * 3) Online Google TTS only when network is available
+ *
+ * The in-app ONNX Piper path is kept only as optional prepare helper; speaking prefers system engines
+ * so a separately installed sherpa APK is used automatically.
  */
 class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListener {
 
@@ -31,6 +34,7 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     private var mediaPlayer: MediaPlayer? = null
     private val speaking = AtomicBoolean(false)
     private val offlineFa = OfflinePersianTts(context)
+    private var preferredEngine: String? = null
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
@@ -38,28 +42,74 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         .build()
 
     fun init() {
-        tts = TextToSpeech(context, this)
-        // Load neural FA model if already downloaded
-        if (offlineFa.isModelDownloaded()) {
-            Thread { offlineFa.prepare() }.start()
+        preferredEngine = findPreferredEngine()
+        tts = if (preferredEngine != null) {
+            Log.i(TAG, "Using TTS engine: $preferredEngine")
+            TextToSpeech(context, this, preferredEngine)
+        } else {
+            TextToSpeech(context, this)
         }
     }
 
     fun offlinePersian(): OfflinePersianTts = offlineFa
 
+    /** Package of installed Sherpa/Piper FA engine if present. */
+    fun sherpaEnginePackage(): String? = findPreferredEngine()
+
+    fun hasSherpaEngine(): Boolean = findPreferredEngine() != null
+
+    private fun findPreferredEngine(): String? {
+        return try {
+            val engines = TextToSpeech(context, null).engines ?: emptyList()
+            // Temporary TTS only to list engines — shutdown immediately
+            val list = engines.map { it.name }
+            Log.d(TAG, "Available TTS engines: $list")
+            val match = engines.firstOrNull { eng ->
+                val n = eng.name.lowercase()
+                n.contains("sherpa") || n.contains("piper") || n.contains("k2fsa") ||
+                    n == SHERPA_PKG
+            }?.name
+            // Also accept if package is installed even when not default
+            if (match != null) match
+            else if (isPackageInstalled(SHERPA_PKG)) SHERPA_PKG
+            else null
+        } catch (e: Exception) {
+            Log.w(TAG, "engine probe failed: ${e.message}")
+            if (isPackageInstalled(SHERPA_PKG)) SHERPA_PKG else null
+        }
+    }
+
+    private fun isPackageInstalled(pkg: String): Boolean = try {
+        context.packageManager.getPackageInfo(pkg, 0)
+        true
+    } catch (_: Exception) {
+        false
+    }
+
     override fun onInit(status: Int) {
         if (status != TextToSpeech.SUCCESS) {
             systemReady = false
+            // Retry with default engine if preferred failed
+            if (preferredEngine != null) {
+                preferredEngine = null
+                tts = TextToSpeech(context, this)
+            }
             return
         }
         systemReady = true
-        tts?.setSpeechRate(0.92f)
-        tts?.setPitch(1.08f)
+        tts?.setSpeechRate(0.95f)
+        tts?.setPitch(1.05f)
 
         val fa = tts?.setLanguage(Locale("fa", "IR"))
         systemFaOk = fa == TextToSpeech.LANG_AVAILABLE ||
                 fa == TextToSpeech.LANG_COUNTRY_AVAILABLE ||
-                fa == TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE
+                fa == TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE ||
+                fa == TextToSpeech.LANG_AVAILABLE // sherpa often reports available for fa
+
+        // Some engines report LANG_MISSING_DATA but still speak FA — treat non-ERROR as ok when sherpa
+        if (!systemFaOk && preferredEngine != null) {
+            systemFaOk = fa != TextToSpeech.LANG_NOT_SUPPORTED
+        }
 
         val en = tts?.setLanguage(Locale.US)
         systemEnOk = en == TextToSpeech.LANG_AVAILABLE ||
@@ -69,6 +119,8 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         if (systemFaOk) tts?.language = Locale("fa", "IR")
         else if (systemEnOk) tts?.language = Locale.US
         else tts?.language = Locale.getDefault()
+
+        Log.i(TAG, "TTS ready fa=$systemFaOk en=$systemEnOk engine=$preferredEngine")
     }
 
     fun speak(text: String, onDone: (() -> Unit)? = null) {
@@ -77,61 +129,48 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
             onDone?.invoke()
             return
         }
-        stop()
         speaking.set(true)
-        val online = NetworkUtils.isOnline(context)
-
         Thread {
             try {
-                val segments = splitByScript(clean)
-                for ((index, seg) in segments.withIndex()) {
+                val segments = splitMixedLanguage(clean)
+                for (seg in segments) {
                     if (!speaking.get()) break
-                    val isLast = index == segments.lastIndex
-                    speakSegment(seg.text, seg.lang, online) {
-                        if (isLast) {
-                            speaking.set(false)
-                            onDone?.invoke()
-                        }
-                    }
+                    speakSegment(seg.first, seg.second) {}
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "speak failed", e)
+            } finally {
                 speaking.set(false)
                 onDone?.invoke()
             }
         }.start()
     }
 
-    private fun speakSegment(text: String, lang: String, online: Boolean, onSegmentDone: () -> Unit) {
-        // 1) Neural offline Persian (fully inside app)
-        if (lang == "fa" && offlineFa.isReady()) {
-            val lock = Object()
-            var finished = false
-            offlineFa.speak(text) {
-                synchronized(lock) { finished = true; lock.notifyAll() }
-                onSegmentDone()
-            }
-            synchronized(lock) {
-                if (!finished) try { lock.wait(120_000) } catch (_: InterruptedException) {}
-            }
-            return
-        }
+    fun stop() {
+        speaking.set(false)
+        try { tts?.stop() } catch (_: Exception) {}
+        try { mediaPlayer?.stop(); mediaPlayer?.release() } catch (_: Exception) {}
+        mediaPlayer = null
+    }
 
-        // 2) System TTS
-        val systemOk = when (lang) {
-            "fa" -> systemReady && systemFaOk
-            else -> systemReady && systemEnOk
-        }
-        if (systemOk) {
-            speakSystem(text, lang, allowOnlineFallback = online, onDone = onSegmentDone)
-            return
-        }
+    fun shutdown() {
+        stop()
+        try { tts?.shutdown() } catch (_: Exception) {}
+        tts = null
+    }
+
+    private fun speakSegment(text: String, lang: String, onSegmentDone: () -> Unit) {
+        val online = NetworkUtils.isOnline(context)
+
+        // 1) System TTS (Sherpa/Piper FA or any installed engine)
         if (systemReady) {
-            speakSystem(text, if (systemEnOk) "en" else "default", allowOnlineFallback = online, onDone = onSegmentDone)
-            return
+            val canFa = lang == "fa" && (systemFaOk || preferredEngine != null)
+            val canEn = lang == "en" && systemEnOk
+            if (canFa || canEn || systemReady) {
+                speakSystem(text, lang, allowOnlineFallback = online, onDone = onSegmentDone)
+                return
+            }
         }
 
-        // 3) Online
+        // 2) Online only
         if (online) {
             speakOnline(text, lang, onSegmentDone)
             return
@@ -156,8 +195,8 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
             "en" -> engine.language = Locale.US
             else -> engine.language = Locale.getDefault()
         }
-        engine.setSpeechRate(0.92f)
-        engine.setPitch(1.08f)
+        engine.setSpeechRate(0.95f)
+        engine.setPitch(1.05f)
 
         val lock = Object()
         var finished = false
@@ -176,6 +215,7 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
 
         val params = HashMap<String, String>()
         params[TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID] = "aria_${System.currentTimeMillis()}"
+        @Suppress("DEPRECATION")
         val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, params)
         if (result == TextToSpeech.ERROR) {
             if (allowOnlineFallback) speakOnline(text, lang, onDone) else onDone()
@@ -198,40 +238,29 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
                 val encoded = URLEncoder.encode(chunk, "UTF-8")
                 val url =
                     "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&q=$encoded&tl=$tl"
-                val request = Request.Builder()
-                    .url(url)
-                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
-                    .header("Referer", "https://translate.google.com/")
-                    .get()
-                    .build()
-                http.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use
-                    val bytes = response.body?.bytes() ?: return@use
+                val req = Request.Builder().url(url).header("User-Agent", "Mozilla/5.0").build()
+                http.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    val body = resp.body ?: return@use
                     val tmp = File(context.cacheDir, "aria_tts_${System.currentTimeMillis()}.mp3")
-                    FileOutputStream(tmp).use { it.write(bytes) }
-                    playFileBlocking(tmp)
+                    FileOutputStream(tmp).use { out -> body.byteStream().copyTo(out) }
+                    playFile(tmp)
                     tmp.delete()
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Online TTS failed", e)
+            Log.w(TAG, "online tts failed: ${e.message}")
         } finally {
             onDone()
         }
     }
 
-    private fun playFileBlocking(file: File) {
+    private fun playFile(file: File) {
         val lock = Object()
         var done = false
         try {
             mediaPlayer?.release()
             mediaPlayer = MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
                 setDataSource(file.absolutePath)
                 setOnCompletionListener {
                     synchronized(lock) { done = true; lock.notifyAll() }
@@ -244,88 +273,53 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
                 start()
             }
             synchronized(lock) {
-                if (!done) try { lock.wait(90_000) } catch (_: InterruptedException) {}
+                if (!done) try { lock.wait(60_000) } catch (_: InterruptedException) {}
             }
         } catch (e: Exception) {
-            Log.e(TAG, "playFile failed", e)
+            Log.w(TAG, "play failed: ${e.message}")
+        } finally {
+            try { mediaPlayer?.release() } catch (_: Exception) {}
+            mediaPlayer = null
         }
     }
 
-    fun stop() {
-        speaking.set(false)
-        try { tts?.stop() } catch (_: Exception) {}
-        try {
-            mediaPlayer?.stop()
-            mediaPlayer?.release()
-        } catch (_: Exception) {}
-        mediaPlayer = null
+    private fun splitMixedLanguage(text: String): List<Pair<String, String>> {
+        // Simple: if mostly Persian chars -> fa else en
+        val faChars = text.count { it in '\u0600'..'\u06FF' }
+        val lang = if (faChars >= text.length / 4) "fa" else "en"
+        return listOf(text to lang)
     }
 
-    fun shutdown() {
-        stop()
-        offlineFa.release()
-        tts?.shutdown()
-        tts = null
+    private fun chunkText(text: String, max: Int): List<String> {
+        if (text.length <= max) return listOf(text)
+        val out = mutableListOf<String>()
+        var i = 0
+        while (i < text.length) {
+            val end = (i + max).coerceAtMost(text.length)
+            out.add(text.substring(i, end))
+            i = end
+        }
+        return out
     }
-
-    fun statusSummary(): String = buildString {
-        append("عصبی FA: ")
-        append(if (offlineFa.isReady()) "آماده" else if (offlineFa.isModelDownloaded()) "دانلود شده" else "ندارد")
-        append(" | سیستم FA: ")
-        append(if (systemFaOk) "دارد" else "ندارد")
-        append(" | شبکه: ")
-        append(if (NetworkUtils.isOnline(context)) "وصل" else "قطع")
-    }
-
-    data class Segment(val text: String, val lang: String)
 
     companion object {
         private const val TAG = "AriaVoiceEngine"
+        const val SHERPA_PKG = "com.k2fsa.sherpa.onnx.tts.engine"
 
-        fun splitByScript(input: String): List<Segment> {
-            val result = mutableListOf<Segment>()
-            val sb = StringBuilder()
-            var current: String? = null
-            fun flush() {
-                val t = sb.toString().trim()
-                if (t.isNotEmpty() && current != null) result.add(Segment(t, current!!))
-                sb.clear()
-            }
-            for (ch in input) {
-                val lang = when {
-                    ch.code in 0x0600..0x06FF || ch.code in 0x0750..0x077F ||
-                            ch.code in 0xFB50..0xFDFF || ch.code in 0xFE70..0xFEFF -> "fa"
-                    ch.isLetter() && ch.code < 0x0250 -> "en"
-                    else -> current
-                }
-                if (lang != null && current != null && lang != current && ch.isLetter()) {
-                    flush()
-                    current = lang
-                    sb.append(ch)
-                } else {
-                    if (current == null && lang != null) current = lang
-                    sb.append(ch)
+        fun openSystemTtsSettings(context: Context) {
+            try {
+                context.startActivity(
+                    Intent("com.android.settings.TTS_SETTINGS").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } catch (_: Exception) {
+                try {
+                    context.startActivity(
+                        Intent(android.provider.Settings.ACTION_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                } catch (_: Exception) {
                 }
             }
-            flush()
-            if (result.isEmpty()) result.add(Segment(input.trim(), "fa"))
-            return result
-        }
-
-        fun chunkText(text: String, maxLen: Int): List<String> {
-            if (text.length <= maxLen) return listOf(text)
-            val parts = mutableListOf<String>()
-            var i = 0
-            while (i < text.length) {
-                var end = (i + maxLen).coerceAtMost(text.length)
-                if (end < text.length) {
-                    val space = text.lastIndexOf(' ', end)
-                    if (space > i + 20) end = space
-                }
-                parts.add(text.substring(i, end).trim())
-                i = end
-            }
-            return parts.filter { it.isNotEmpty() }
         }
     }
 }
