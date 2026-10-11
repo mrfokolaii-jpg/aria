@@ -9,8 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
-import android.text.InputType
-import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -18,17 +17,19 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.mrfokolaii.aria.agent.ApiConnectionTester
 import com.mrfokolaii.aria.agent.UnoRouterProvider
 import com.mrfokolaii.aria.memory.PersistentMemory
-import com.mrfokolaii.aria.voice.OfflinePersianTts
+import com.mrfokolaii.aria.voice.AriaVoiceEngine
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
+    private lateinit var activeProviderLabel: TextView
+    private lateinit var offlineTtsStatus: TextView
     private lateinit var groqKey: EditText
     private lateinit var groqModel: EditText
     private lateinit var groqStatus: TextView
@@ -43,51 +44,29 @@ class MainActivity : AppCompatActivity() {
     private lateinit var customModel: EditText
     private lateinit var customStatus: TextView
     private lateinit var widgetSwitch: Switch
-    private lateinit var activeProviderLabel: TextView
-    private lateinit var offlineTtsStatus: TextView
-
-    private val permissionsLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        if (results.values.any { it } || results[Manifest.permission.RECORD_AUDIO] == true) {
-            requestSpecialPermissions()
-        } else {
-            showStatus("برخی مجوزها رد شدند.")
-            requestSpecialPermissions()
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        showSetup()
-        val prefs = getSharedPreferences("aria", MODE_PRIVATE)
-        if (!prefs.getBoolean("first_run_done", false)) {
+        if (!getSharedPreferences("aria", MODE_PRIVATE).getBoolean("first_run_done", false)) {
             requestAllPermissionsFirstRun()
         }
+        showSetup()
     }
 
     private fun requestAllPermissionsFirstRun() {
-        val list = mutableListOf(
+        val perms = mutableListOf(
             Manifest.permission.RECORD_AUDIO,
-            Manifest.permission.POST_NOTIFICATIONS,
-            Manifest.permission.CAMERA,
-            Manifest.permission.CALL_PHONE,
-            Manifest.permission.SEND_SMS
+            Manifest.permission.INTERNET,
+            Manifest.permission.ACCESS_NETWORK_STATE
         )
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
-            list.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            list.add(Manifest.permission.READ_EXTERNAL_STORAGE)
-        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            list.add(Manifest.permission.READ_MEDIA_IMAGES)
+            perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
-        val needed = list.filter {
-            try {
-                ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-            } catch (_: Exception) { false }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            perms.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
-        if (needed.isNotEmpty()) permissionsLauncher.launch(needed.toTypedArray())
-        else requestSpecialPermissions()
+        ActivityCompat.requestPermissions(this, perms.toTypedArray(), 1001)
+        requestSpecialPermissions()
     }
 
     private fun requestSpecialPermissions() {
@@ -121,16 +100,17 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("aria", MODE_PRIVATE)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 28, 32, 32)
-            setBackgroundColor(Color.parseColor("#121212"))
+            setPadding(28, 24, 28, 28)
+            setBackgroundColor(Color.parseColor("#0F0F1A"))
         }
         val scroll = ScrollView(this)
         scroll.addView(root)
 
         root.addView(TextView(this).apply {
-            text = "🤖 تنظیمات ARIA"
+            text = "تنظیمات ARIA"
             textSize = 22f
             setTextColor(Color.WHITE)
+            setPadding(0, 8, 0, 4)
         })
 
         activeProviderLabel = TextView(this).apply {
@@ -143,48 +123,64 @@ class MainActivity : AppCompatActivity() {
 
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         actions.addView(Button(this).apply {
-            text = "💬 چت"
+            text = "چت"
+            setBackgroundColor(Color.parseColor("#2A2A40"))
+            setTextColor(Color.WHITE)
             setOnClickListener { startActivity(Intent(this@MainActivity, ChatActivity::class.java)) }
         })
         actions.addView(Button(this).apply {
-            text = "🔐 مجوزها"
+            text = "مجوزها"
+            setBackgroundColor(Color.parseColor("#2A2A40"))
+            setTextColor(Color.WHITE)
             setOnClickListener { requestAllPermissionsFirstRun() }
         })
         root.addView(actions)
 
-        // Offline Persian TTS
+        // System / Sherpa offline TTS
         root.addView(TextView(this).apply {
-            text = "🎙 موتور فارسی آفلاین (داخل اپ)"
+            text = "صدای فارسی آفلاین"
             textSize = 16f
             setTextColor(Color.WHITE)
             setPadding(0, 20, 0, 8)
         })
-        val off = OfflinePersianTts(this)
+        val sherpaInstalled = try {
+            packageManager.getPackageInfo(AriaVoiceEngine.SHERPA_PKG, 0)
+            true
+        } catch (_: Exception) { false }
         offlineTtsStatus = TextView(this).apply {
-            text = offlineStatusText(off)
+            text = if (sherpaInstalled)
+                "موتور Sherpa/Piper فارسی نصب است — اپ از آن استفاده می‌کند"
+            else
+                "موتور Sherpa نصب نیست. APK فارسی Piper را نصب کنید و در تنظیمات TTS گوشی موتور پیش‌فرض کنید."
             textSize = 12f
-            setTextColor(Color.LTGRAY)
+            setTextColor(if (sherpaInstalled) Color.parseColor("#00E676") else Color.parseColor("#FFAB40"))
             setPadding(0, 0, 0, 8)
         }
         root.addView(offlineTtsStatus)
         root.addView(Button(this).apply {
-            text = "⬇️ دانلود مدل فارسی آفلاین (یک‌بار با اینترنت)"
-            setOnClickListener { downloadOfflineTts() }
+            text = "تنظیمات صدای گوشی (TTS)"
+            setBackgroundColor(Color.parseColor("#2A2A40"))
+            setTextColor(Color.WHITE)
+            setOnClickListener { AriaVoiceEngine.openSystemTtsSettings(this@MainActivity) }
         })
         root.addView(TextView(this).apply {
-            text = "بعد از دانلود، بدون اینترنت با صدای عصبی فارسی صحبت می‌کند."
+            text = "اگر صدا درست نیست: تنظیمات گوشی → زبان و ورودی → خروجی گفتار → موتور Sherpa را انتخاب کنید."
             textSize = 11f
             setTextColor(Color.GRAY)
-            setPadding(0, 4, 0, 12)
+            setPadding(0, 6, 0, 14)
         })
 
-        // Providers
         val groqLayout = collapsibleSection(root, "۱. Groq", "https://console.groq.com/keys")
         groqKey = passField("Groq API Key", prefs.getString("groq_api_key", "") ?: "")
         groqLayout.addView(groqKey)
-        groqModel = textField("مدل", prefs.getString("groq_model", "llama-3.3-70b-versatile") ?: "llama-3.3-70b-versatile")
+        groqModel = textField("مدل", prefs.getString("groq_model", "openai/gpt-oss-20b") ?: "openai/gpt-oss-20b")
         groqLayout.addView(groqModel)
-        groqLayout.addView(Button(this).apply { text = "تست Groq"; setOnClickListener { testProvider("groq") } })
+        groqLayout.addView(Button(this).apply {
+            text = "تست Groq"
+            setBackgroundColor(Color.parseColor("#2A2A40"))
+            setTextColor(Color.WHITE)
+            setOnClickListener { testProvider("groq") }
+        })
         groqStatus = statusView(prefs.getBoolean("groq_test_ok", false))
         groqLayout.addView(groqStatus)
 
@@ -193,7 +189,12 @@ class MainActivity : AppCompatActivity() {
         orLayout.addView(openRouterKey)
         openRouterModel = textField("مدل", prefs.getString("openrouter_model", "google/gemini-flash-1.5") ?: "google/gemini-flash-1.5")
         orLayout.addView(openRouterModel)
-        orLayout.addView(Button(this).apply { text = "تست OpenRouter"; setOnClickListener { testProvider("openrouter") } })
+        orLayout.addView(Button(this).apply {
+            text = "تست OpenRouter"
+            setBackgroundColor(Color.parseColor("#2A2A40"))
+            setTextColor(Color.WHITE)
+            setOnClickListener { testProvider("openrouter") }
+        })
         openRouterStatus = statusView(prefs.getBoolean("openrouter_test_ok", false))
         orLayout.addView(openRouterStatus)
 
@@ -202,7 +203,12 @@ class MainActivity : AppCompatActivity() {
         xaiLayout.addView(xaiKey)
         xaiModel = textField("مدل", prefs.getString("xai_model", "grok-3") ?: "grok-3")
         xaiLayout.addView(xaiModel)
-        xaiLayout.addView(Button(this).apply { text = "تست xAI"; setOnClickListener { testProvider("xai") } })
+        xaiLayout.addView(Button(this).apply {
+            text = "تست xAI"
+            setBackgroundColor(Color.parseColor("#2A2A40"))
+            setTextColor(Color.WHITE)
+            setOnClickListener { testProvider("xai") }
+        })
         xaiStatus = statusView(prefs.getBoolean("xai_test_ok", false))
         xaiLayout.addView(xaiStatus)
 
@@ -213,18 +219,23 @@ class MainActivity : AppCompatActivity() {
         customLayout.addView(customKey)
         customModel = textField("Model", prefs.getString("custom_model", "") ?: "")
         customLayout.addView(customModel)
-        customLayout.addView(Button(this).apply { text = "تست سفارشی"; setOnClickListener { testProvider("custom") } })
+        customLayout.addView(Button(this).apply {
+            text = "تست سفارشی"
+            setBackgroundColor(Color.parseColor("#2A2A40"))
+            setTextColor(Color.WHITE)
+            setOnClickListener { testProvider("custom") }
+        })
         customStatus = statusView(prefs.getBoolean("custom_test_ok", false))
         customLayout.addView(customStatus)
 
         root.addView(TextView(this).apply {
-            text = "⚙️ ویجت"
+            text = "ویجت"
             textSize = 16f
             setTextColor(Color.WHITE)
-            setPadding(0, 20, 0, 8)
+            setPadding(0, 16, 0, 8)
         })
         widgetSwitch = Switch(this).apply {
-            text = "ویجت شناور"
+            text = "ویجت شناور روشن/خاموش"
             setTextColor(Color.WHITE)
             isChecked = prefs.getBoolean("floating_widget_enabled", true)
             setOnCheckedChangeListener { _, enabled ->
@@ -236,7 +247,9 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(widgetSwitch)
         root.addView(Button(this).apply {
-            text = "💾 ذخیره و اجرای ویجت"
+            text = "ذخیره و اجرای ویجت"
+            setBackgroundColor(Color.parseColor("#00C853"))
+            setTextColor(Color.WHITE)
             setOnClickListener {
                 saveFields()
                 prefs.edit().putBoolean("floating_widget_enabled", true).apply()
@@ -248,101 +261,114 @@ class MainActivity : AppCompatActivity() {
         setContentView(scroll)
     }
 
-    private fun offlineStatusText(off: OfflinePersianTts): String =
-        when {
-            off.isReady() -> "✅ موتور عصبی فارسی آماده (آفلاین)"
-            off.isModelDownloaded() -> "📦 مدل دانلود شده — در حال آماده‌سازی..."
-            else -> "⬜ هنوز دانلود نشده (حدود ۶۰–۹۰ مگ)"
-        }
-
-    private fun downloadOfflineTts() {
-        val off = OfflinePersianTts(this)
-        if (off.isReady()) {
-            showStatus("موتور از قبل آماده است")
-            offlineTtsStatus.text = offlineStatusText(off)
-            return
-        }
-        showStatus("شروع دانلود مدل فارسی...")
-        Thread {
-            val ok = off.downloadModel { msg ->
-                runOnUiThread { offlineTtsStatus.text = msg }
-            }
-            runOnUiThread {
-                offlineTtsStatus.text = offlineStatusText(off)
-                showStatus(if (ok) "مدل فارسی آفلاین آماده شد" else "دانلود ناموفق — اینترنت را چک کن")
-            }
-        }.start()
-    }
-
-    private fun passField(hint: String, value: String) = EditText(this).apply {
-        this.hint = hint; setSingleLine(true)
-        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        setText(value); setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
-    }
-
-    private fun textField(hint: String, value: String) = EditText(this).apply {
-        this.hint = hint; setSingleLine(true)
-        setText(value); setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
-    }
-
-    private fun statusView(ok: Boolean) = TextView(this).apply {
-        text = "وضعیت: " + if (ok) "موفق ✅" else "غیرفعال ❌"
-        textSize = 13f; setTextColor(Color.LTGRAY); setPadding(0, 4, 0, 8)
-    }
-
     private fun collapsibleSection(parent: LinearLayout, title: String, regUrl: String?): LinearLayout {
-        val section = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; visibility = View.GONE; setPadding(16, 8, 16, 16)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(12, 8, 12, 8)
+            setBackgroundColor(Color.parseColor("#16162A"))
         }
-        parent.addView(TextView(this).apply {
-            text = "▼ $title"; textSize = 15f; setTextColor(Color.parseColor("#90CAF9"))
-            setPadding(0, 14, 0, 6)
-            setOnClickListener {
-                section.visibility = if (section.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-            }
-        })
+        val header = TextView(this).apply {
+            text = title
+            textSize = 15f
+            setTextColor(Color.parseColor("#90CAF9"))
+            setPadding(0, 8, 0, 6)
+        }
+        box.addView(header)
         if (regUrl != null) {
-            section.addView(TextView(this).apply {
-                text = "🔑 $regUrl"; textSize = 12f; setTextColor(Color.parseColor("#64B5F6"))
-                setOnClickListener { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(regUrl))) }
+            box.addView(TextView(this).apply {
+                text = regUrl
+                textSize = 11f
+                setTextColor(Color.parseColor("#64B5F6"))
+                setOnClickListener {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(regUrl)))
+                }
             })
         }
-        parent.addView(section)
-        return section
+        parent.addView(box)
+        parent.addView(TextView(this).apply { text = " "; textSize = 6f })
+        return box
+    }
+
+    private fun textField(hint: String, value: String): EditText = EditText(this).apply {
+        this.hint = hint
+        setText(value)
+        setHintTextColor(Color.GRAY)
+        setTextColor(Color.WHITE)
+        setBackgroundColor(Color.parseColor("#252540"))
+        setPadding(16, 14, 16, 14)
+    }
+
+    private fun passField(hint: String, value: String): EditText = textField(hint, value).apply {
+        inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+    }
+
+    private fun statusView(ok: Boolean): TextView = TextView(this).apply {
+        text = if (ok) "وضعیت: فعال" else "وضعیت: غیرفعال"
+        setTextColor(if (ok) Color.parseColor("#00E676") else Color.parseColor("#EF5350"))
+        textSize = 12f
+        setPadding(0, 4, 0, 8)
     }
 
     private fun saveFields() {
-        getSharedPreferences("aria", MODE_PRIVATE).edit()
-            .putString("groq_api_key", groqKey.text.toString().trim())
-            .putString("groq_model", groqModel.text.toString().trim())
-            .putString("openrouter_api_key", openRouterKey.text.toString().trim())
-            .putString("openrouter_model", openRouterModel.text.toString().trim())
-            .putString("xai_api_key", xaiKey.text.toString().trim())
-            .putString("xai_model", xaiModel.text.toString().trim())
-            .putString("custom_api_url", customUrl.text.toString().trim())
-            .putString("custom_api_key", customKey.text.toString().trim())
-            .putString("custom_model", customModel.text.toString().trim())
-            .apply()
+        val prefs = getSharedPreferences("aria", MODE_PRIVATE).edit()
+        prefs.putString("groq_api_key", groqKey.text.toString().trim())
+        prefs.putString("groq_model", groqModel.text.toString().trim())
+        prefs.putString("openrouter_api_key", openRouterKey.text.toString().trim())
+        prefs.putString("openrouter_model", openRouterModel.text.toString().trim())
+        prefs.putString("xai_api_key", xaiKey.text.toString().trim())
+        prefs.putString("xai_model", xaiModel.text.toString().trim())
+        prefs.putString("custom_api_url", customUrl.text.toString().trim())
+        prefs.putString("custom_api_key", customKey.text.toString().trim())
+        prefs.putString("custom_model", customModel.text.toString().trim())
+        prefs.apply()
     }
 
-    private fun testProvider(which: String) {
+    private fun testProvider(name: String) {
         saveFields()
         val prefs = getSharedPreferences("aria", MODE_PRIVATE)
-        val (key, url, model) = when (which) {
-            "groq" -> Triple(groqKey.text.toString().trim(), UnoRouterProvider.GROQ_BASE, groqModel.text.toString().trim().ifBlank { "llama-3.3-70b-versatile" })
-            "openrouter" -> Triple(openRouterKey.text.toString().trim(), UnoRouterProvider.OPENROUTER_BASE, openRouterModel.text.toString().trim())
-            "xai" -> Triple(xaiKey.text.toString().trim(), UnoRouterProvider.XAI_BASE, xaiModel.text.toString().trim().ifBlank { "grok-3" })
-            else -> Triple(customKey.text.toString().trim(), customUrl.text.toString().trim(), customModel.text.toString().trim())
+        val (key, endpoint, model) = when (name) {
+            "openrouter" -> Triple(
+                openRouterKey.text.toString().trim(),
+                UnoRouterProvider.OPENROUTER_BASE,
+                openRouterModel.text.toString().trim()
+            )
+            "xai" -> Triple(
+                xaiKey.text.toString().trim(),
+                UnoRouterProvider.XAI_BASE,
+                xaiModel.text.toString().trim()
+            )
+            "custom" -> Triple(
+                customKey.text.toString().trim(),
+                customUrl.text.toString().trim(),
+                customModel.text.toString().trim()
+            )
+            else -> Triple(
+                groqKey.text.toString().trim(),
+                UnoRouterProvider.GROQ_BASE,
+                groqModel.text.toString().trim()
+            )
         }
         Thread {
-            val result = ApiConnectionTester.test(key, url, model)
+            val result = ApiConnectionTester.test(key, endpoint, model)
             runOnUiThread {
-                prefs.edit().putBoolean("${which}_test_ok", result.success).apply()
-                if (result.success) {
-                    prefs.edit().putString("active_provider", which).apply()
-                    activeProviderLabel.text = "ارائه‌دهنده فعال: $which"
+                val statusView = when (name) {
+                    "openrouter" -> openRouterStatus
+                    "xai" -> xaiStatus
+                    "custom" -> customStatus
+                    else -> groqStatus
                 }
-                showStatus("$which: ${result.message}")
+                statusView.text = if (result.success) "وضعیت: فعال" else "وضعیت: غیرفعال — ${result.message.take(80)}"
+                statusView.setTextColor(
+                    if (result.success) Color.parseColor("#00E676") else Color.parseColor("#EF5350")
+                )
+                prefs.edit().putBoolean("${name}_test_ok", result.success).apply()
+                if (result.success) {
+                    prefs.edit().putString("active_provider", name).apply()
+                    activeProviderLabel.text = "ارائه‌دهنده فعال: $name"
+                    Toast.makeText(this, "اتصال موفق", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
+                }
             }
         }.start()
     }
@@ -350,24 +376,10 @@ class MainActivity : AppCompatActivity() {
     private fun ensureRunPermissions() {
         if (!Settings.canDrawOverlays(this)) {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            Toast.makeText(this, "مجوز نمایش روی برنامه‌ها لازم است", Toast.LENGTH_LONG).show()
             return
         }
-        val list = mutableListOf(Manifest.permission.RECORD_AUDIO)
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) list.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        val needed = list.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-        if (needed.isNotEmpty()) { permissionsLauncher.launch(needed.toTypedArray()); return }
-        createGrokFolder()
-        startAria()
-    }
-
-    private fun startAria() {
-        try {
-            ContextCompat.startForegroundService(this, Intent(this, AriaOverlayService::class.java))
-            showStatus("ویجت فعال شد")
-        } catch (e: Exception) { showStatus("خطا: ${e.message}") }
-    }
-
-    private fun showStatus(msg: String) {
-        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        ContextCompat.startForegroundService(this, Intent(this, AriaOverlayService::class.java))
+        Toast.makeText(this, "ویجت فعال شد", Toast.LENGTH_SHORT).show()
     }
 }
