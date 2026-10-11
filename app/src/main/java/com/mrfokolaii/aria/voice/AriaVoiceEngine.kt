@@ -3,6 +3,7 @@ package com.mrfokolaii.aria.voice
 import android.content.Context
 import android.content.Intent
 import android.media.MediaPlayer
+import android.net.Uri
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
@@ -17,21 +18,18 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * TTS priority:
- * 1) System TTS — preferably installed Sherpa/Piper FA (com.k2fsa.sherpa.onnx.tts.engine)
- * 2) Default system engine
- * 3) Online Google TTS when network available
+ * Uses the **phone default TTS engine** (whatever user picks in system settings).
+ * Not bound to a fixed package name — change voice in phone settings and app follows.
+ *
+ * Priority: System TTS → Online Google TTS (if online).
  */
 class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListener {
 
     private var tts: TextToSpeech? = null
     private var systemReady = false
-    private var systemFaOk = false
-    private var systemEnOk = false
     private var mediaPlayer: MediaPlayer? = null
     private val speaking = AtomicBoolean(false)
     private val offlineFa = OfflinePersianTts(context)
-    private var preferredEngine: String? = null
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
@@ -39,23 +37,13 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         .build()
 
     fun init() {
-        preferredEngine = findPreferredEngine()
-        tts = if (preferredEngine != null) {
-            Log.i(TAG, "Using TTS engine: $preferredEngine")
-            TextToSpeech(context, this, preferredEngine)
-        } else {
-            TextToSpeech(context, this)
-        }
+        // Always default system engine — user can switch voice in phone TTS settings
+        tts = TextToSpeech(context, this)
     }
 
     fun offlinePersian(): OfflinePersianTts = offlineFa
 
-    fun sherpaEnginePackage(): String? = findPreferredEngine()
-
     fun hasSherpaEngine(): Boolean = isPackageInstalled(SHERPA_PKG)
-
-    private fun findPreferredEngine(): String? =
-        if (isPackageInstalled(SHERPA_PKG)) SHERPA_PKG else null
 
     private fun isPackageInstalled(pkg: String): Boolean = try {
         context.packageManager.getPackageInfo(pkg, 0)
@@ -67,39 +55,24 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     override fun onInit(status: Int) {
         if (status != TextToSpeech.SUCCESS) {
             systemReady = false
-            if (preferredEngine != null) {
-                preferredEngine = null
-                tts = TextToSpeech(context, this)
-            }
+            Log.w(TAG, "TTS init failed status=$status")
             return
         }
         systemReady = true
         tts?.setSpeechRate(0.95f)
         tts?.setPitch(1.05f)
-
+        // Prefer Persian if engine supports it; otherwise keep default
         val fa = tts?.setLanguage(Locale("fa", "IR"))
-        systemFaOk = fa == TextToSpeech.LANG_AVAILABLE ||
-                fa == TextToSpeech.LANG_COUNTRY_AVAILABLE ||
-                fa == TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE
-
-        if (!systemFaOk && preferredEngine != null) {
-            systemFaOk = fa != TextToSpeech.LANG_NOT_SUPPORTED
+        if (fa == TextToSpeech.LANG_NOT_SUPPORTED) {
+            tts?.language = Locale.getDefault()
+        } else {
+            tts?.language = Locale("fa", "IR")
         }
-
-        val en = tts?.setLanguage(Locale.US)
-        systemEnOk = en == TextToSpeech.LANG_AVAILABLE ||
-                en == TextToSpeech.LANG_COUNTRY_AVAILABLE ||
-                en == TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE
-
-        if (systemFaOk) tts?.language = Locale("fa", "IR")
-        else if (systemEnOk) tts?.language = Locale.US
-        else tts?.language = Locale.getDefault()
-
-        Log.i(TAG, "TTS ready fa=$systemFaOk en=$systemEnOk engine=$preferredEngine")
+        Log.i(TAG, "System TTS ready defaultEngine=${tts?.defaultEngine}")
     }
 
     fun speak(text: String, onDone: (() -> Unit)? = null) {
-        val clean = text.trim()
+        val clean = sanitizeForSpeech(text)
         if (clean.isEmpty()) {
             onDone?.invoke()
             return
@@ -107,11 +80,8 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         speaking.set(true)
         Thread {
             try {
-                val segments = splitMixedLanguage(clean)
-                for (seg in segments) {
-                    if (!speaking.get()) break
-                    speakSegment(seg.first, seg.second) {}
-                }
+                val lang = detectLang(clean)
+                speakSegment(clean, lang) {}
             } finally {
                 speaking.set(false)
                 onDone?.invoke()
@@ -134,17 +104,15 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
 
     private fun speakSegment(text: String, lang: String, onSegmentDone: () -> Unit) {
         val online = NetworkUtils.isOnline(context)
-
         if (systemReady) {
             speakSystem(text, lang, allowOnlineFallback = online, onDone = onSegmentDone)
             return
         }
-
         if (online) {
             speakOnline(text, lang, onSegmentDone)
             return
         }
-        Log.w(TAG, "No TTS available offline")
+        Log.w(TAG, "No TTS available")
         onSegmentDone()
     }
 
@@ -162,7 +130,7 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         when (lang) {
             "fa" -> engine.language = Locale("fa", "IR")
             "en" -> engine.language = Locale.US
-            else -> engine.language = Locale.getDefault()
+            else -> { /* keep current */ }
         }
         engine.setSpeechRate(0.95f)
         engine.setPitch(1.05f)
@@ -252,10 +220,9 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         }
     }
 
-    private fun splitMixedLanguage(text: String): List<Pair<String, String>> {
+    private fun detectLang(text: String): String {
         val faChars = text.count { it in '\u0600'..'\u06FF' }
-        val lang = if (faChars >= text.length / 4) "fa" else "en"
-        return listOf(text to lang)
+        return if (faChars >= text.length / 4) "fa" else "en"
     }
 
     private fun chunkText(text: String, max: Int): List<String> {
@@ -273,6 +240,27 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     companion object {
         private const val TAG = "AriaVoiceEngine"
         const val SHERPA_PKG = "com.k2fsa.sherpa.onnx.tts.engine"
+        const val SHERPA_ENGINES_URL = "https://k2-fsa.github.io/sherpa/onnx/tts/apk-engine.html"
+
+        /**
+         * Remove symbols/punctuation so TTS does not say "star", "parenthesis", etc.
+         * Keeps Persian/Arabic letters, Latin letters, digits, spaces, and basic Persian punctuation.
+         */
+        fun sanitizeForSpeech(raw: String): String {
+            // Strip markdown-ish and decorative symbols; keep readable text
+            var s = raw
+            // Common emoji / stars / bullets
+            s = s.replace(Regex("[*⭐✦✧✩✪✫✬✭✮✯✰∗﹡＊•●○◆◇■□▪▫►◄▶◀✓✔︎✅❌➕➖✖➗="']+"), " ")
+            // Math & currency & special
+            s = s.replace(Regex("[+\\-*/()\\[\\]{}<>|\\\\^~`@#_$%&=±×÷√π∆§™®©₤¥¢€£°_]+"), " ")
+            // Persian/Arabic decorative and punctuation that sounds bad when read aloud
+            s = s.replace(Regex("[«»״׳٪٫٬،؛؟…!!:;,./]+"), " ")
+            // Zero-width and control
+            s = s.replace(Regex("[\\u200c\\u200f\\u202a-\\u202e\\u2060\\ufeff]+"), " ")
+            // Collapse whitespace
+            s = s.replace(Regex("\\s+"), " ").trim()
+            return s
+        }
 
         fun openSystemTtsSettings(context: Context) {
             try {
@@ -287,6 +275,16 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
                     )
                 } catch (_: Exception) {
                 }
+            }
+        }
+
+        fun openSherpaEnginesPage(context: Context) {
+            try {
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW, Uri.parse(SHERPA_ENGINES_URL))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } catch (_: Exception) {
             }
         }
     }
