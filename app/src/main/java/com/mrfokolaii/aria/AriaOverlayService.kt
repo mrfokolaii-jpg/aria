@@ -48,7 +48,6 @@ class AriaOverlayService : Service() {
     private var isProcessing = false
     private var isHidden = false
     private var preferEnglishStt = false
-    /** After first command, keep listening for next until idle 30s */
     private var conversationActive = false
 
     private val handler = Handler(Looper.getMainLooper())
@@ -84,12 +83,11 @@ class AriaOverlayService : Service() {
 
     private fun initBridge() {
         val prefs = getSharedPreferences("aria", MODE_PRIVATE)
-        val provider = prefs.getString("active_provider", "groq") ?: "groq"
-        val (key, endpoint, model) = when (provider) {
+        fun load(provider: String): Triple<String, String, String> = when (provider) {
             "openrouter" -> Triple(
                 prefs.getString("openrouter_api_key", "") ?: "",
                 UnoRouterProvider.OPENROUTER_BASE,
-                prefs.getString("openrouter_model", "google/gemini-flash-1.5") ?: "google/gemini-flash-1.5"
+                prefs.getString("openrouter_model", "openrouter/free") ?: "openrouter/free"
             )
             "xai" -> Triple(
                 prefs.getString("xai_api_key", "") ?: "",
@@ -106,6 +104,21 @@ class AriaOverlayService : Service() {
                 UnoRouterProvider.GROQ_BASE,
                 prefs.getString("groq_model", "openai/gpt-oss-20b") ?: "openai/gpt-oss-20b"
             )
+        }
+        var provider = prefs.getString("active_provider", "groq") ?: "groq"
+        var (key, endpoint, model) = load(provider)
+        if (key.isBlank()) {
+            for (p in listOf("groq", "openrouter", "xai", "custom")) {
+                val t = load(p)
+                if (t.first.isNotBlank()) {
+                    provider = p
+                    key = t.first
+                    endpoint = t.second
+                    model = t.third
+                    prefs.edit().putString("active_provider", p).apply()
+                    break
+                }
+            }
         }
         agentBridge = AgentBridge(this, key, endpoint, model)
     }
@@ -169,9 +182,7 @@ class AriaOverlayService : Service() {
                     updateStatus("در حال گوش دادن...")
                     armIdleTimer()
                 }
-                override fun onBeginningOfSpeech() {
-                    armIdleTimer()
-                }
+                override fun onBeginningOfSpeech() { armIdleTimer() }
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() {
@@ -181,7 +192,6 @@ class AriaOverlayService : Service() {
                 override fun onError(error: Int) {
                     isListening = false
                     isProcessing = false
-                    // In conversation mode, timeout/no-match → listen again until 30s idle
                     if (conversationActive &&
                         (error == SpeechRecognizer.ERROR_NO_MATCH ||
                             error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
@@ -210,9 +220,8 @@ class AriaOverlayService : Service() {
                         ?.firstOrNull()?.trim()
                     if (text.isNullOrBlank()) {
                         isProcessing = false
-                        if (conversationActive) {
-                            scheduleListenAgain()
-                        } else {
+                        if (conversationActive) scheduleListenAgain()
+                        else {
                             updateButton("ARIA", 0xFF00C853.toInt())
                             updateStatus("ویجت صوتی فعال")
                         }
@@ -229,18 +238,12 @@ class AriaOverlayService : Service() {
 
     private fun initFloatingWidget() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            Toast.makeText(
-                this,
-                "مجوز «نمایش روی برنامه‌ها» را بدهید تا ویجت دیده شود",
-                Toast.LENGTH_LONG
-            ).show()
+            Toast.makeText(this, "مجوز «نمایش روی برنامه‌ها» را بدهید تا ویجت دیده شود", Toast.LENGTH_LONG).show()
             return
         }
-
         if (windowManager == null) {
             windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         }
-
         try { floatButton?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
 
         val layoutFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -271,52 +274,32 @@ class AriaOverlayService : Service() {
             setPadding(36, 28, 36, 28)
             textSize = 16f
             elevation = 12f
-
             setOnClickListener {
-                if (isHidden) {
-                    showWidget()
-                    return@setOnClickListener
-                }
+                if (isHidden) { showWidget(); return@setOnClickListener }
                 if (isListening || isProcessing) return@setOnClickListener
                 conversationActive = true
                 armIdleTimer()
                 startListening()
             }
-
-            var initialX = 0
-            var initialY = 0
-            var initialTouchX = 0f
-            var initialTouchY = 0f
-            var moved = false
-
+            var initialX = 0; var initialY = 0; var initialTouchX = 0f; var initialTouchY = 0f; var moved = false
             setOnTouchListener { _, event ->
                 val params = overlayParams ?: return@setOnTouchListener false
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
-                        initialX = params.x
-                        initialY = params.y
-                        initialTouchX = event.rawX
-                        initialTouchY = event.rawY
-                        moved = false
-                        true
+                        initialX = params.x; initialY = params.y
+                        initialTouchX = event.rawX; initialTouchY = event.rawY; moved = false; true
                     }
                     MotionEvent.ACTION_MOVE -> {
                         val dx = (event.rawX - initialTouchX).toInt()
                         val dy = (event.rawY - initialTouchY).toInt()
                         if (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8) {
                             moved = true
-                            params.x = initialX - dx
-                            params.y = initialY + dy
-                            try {
-                                windowManager?.updateViewLayout(floatButton, params)
-                            } catch (_: Exception) {}
+                            params.x = initialX - dx; params.y = initialY + dy
+                            try { windowManager?.updateViewLayout(floatButton, params) } catch (_: Exception) {}
                         }
                         true
                     }
-                    MotionEvent.ACTION_UP -> {
-                        if (!moved) performClick()
-                        true
-                    }
+                    MotionEvent.ACTION_UP -> { if (!moved) performClick(); true }
                     else -> false
                 }
             }
@@ -334,15 +317,12 @@ class AriaOverlayService : Service() {
     private fun showWidget() {
         if (!isHidden && floatButton != null) return
         try {
-            if (floatButton == null) {
-                initFloatingWidget()
-            } else {
+            if (floatButton == null) initFloatingWidget()
+            else {
                 overlayParams?.let { windowManager?.addView(floatButton, it) }
                 isHidden = false
             }
-        } catch (_: Exception) {
-            initFloatingWidget()
-        }
+        } catch (_: Exception) { initFloatingWidget() }
     }
 
     private fun updateButton(label: String, color: Int) {
@@ -355,8 +335,7 @@ class AriaOverlayService : Service() {
     private fun startListening() {
         if (isListening || isProcessing) return
         val sr = speechRecognizer ?: run {
-            speak("تشخیص گفتار در دسترس نیست")
-            return
+            speak("تشخیص گفتار در دسترس نیست"); return
         }
         isListening = true
         isProcessing = true
@@ -364,18 +343,14 @@ class AriaOverlayService : Service() {
         updateStatus("در حال گوش دادن...")
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE,
-                if (preferEnglishStt) Locale.US.toString() else "fa-IR"
-            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, if (preferEnglishStt) Locale.US.toString() else "fa-IR")
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
         }
         try {
             sr.startListening(intent)
         } catch (e: Exception) {
-            isListening = false
-            isProcessing = false
+            isListening = false; isProcessing = false
             updateButton("ARIA", 0xFF00C853.toInt())
             updateStatus("ویجت صوتی فعال")
             Log.e(TAG, "startListening", e)
@@ -383,6 +358,7 @@ class AriaOverlayService : Service() {
     }
 
     private fun processUserInput(text: String) {
+        initBridge()
         isProcessing = true
         conversationActive = true
         armIdleTimer()
