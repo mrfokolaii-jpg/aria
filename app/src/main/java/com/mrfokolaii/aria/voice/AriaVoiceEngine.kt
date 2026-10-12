@@ -2,8 +2,11 @@ package com.mrfokolaii.aria.voice
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.MediaPlayer
 import android.net.Uri
+import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
@@ -17,10 +20,6 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Uses the phone default TTS engine (whatever user picks in system settings).
- * Priority: System TTS → Online Google TTS (if online).
- */
 class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListener {
 
     private var tts: TextToSpeech? = null
@@ -28,6 +27,7 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
     private var mediaPlayer: MediaPlayer? = null
     private val speaking = AtomicBoolean(false)
     private val offlineFa = OfflinePersianTts(context)
+    private val initLock = Object()
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
@@ -53,18 +53,38 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         if (status != TextToSpeech.SUCCESS) {
             systemReady = false
             Log.w(TAG, "TTS init failed status=$status")
+            synchronized(initLock) { initLock.notifyAll() }
             return
         }
         systemReady = true
+        try {
+            tts?.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+        } catch (_: Exception) {}
         tts?.setSpeechRate(0.95f)
         tts?.setPitch(1.05f)
         val fa = tts?.setLanguage(Locale("fa", "IR"))
         if (fa == TextToSpeech.LANG_NOT_SUPPORTED) {
             tts?.language = Locale.getDefault()
+            Log.w(TAG, "FA not supported by current engine, using default")
         } else {
             tts?.language = Locale("fa", "IR")
         }
-        Log.i(TAG, "System TTS ready defaultEngine=${tts?.defaultEngine}")
+        Log.i(TAG, "System TTS ready engine=${tts?.defaultEngine}")
+        synchronized(initLock) { initLock.notifyAll() }
+    }
+
+    private fun awaitReady(timeoutMs: Long = 4000) {
+        if (systemReady) return
+        synchronized(initLock) {
+            if (!systemReady) {
+                try { initLock.wait(timeoutMs) } catch (_: InterruptedException) {}
+            }
+        }
     }
 
     fun speak(text: String, onDone: (() -> Unit)? = null) {
@@ -76,6 +96,7 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         speaking.set(true)
         Thread {
             try {
+                awaitReady()
                 val lang = detectLang(clean)
                 speakSegment(clean, lang) {}
             } finally {
@@ -100,7 +121,7 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
 
     private fun speakSegment(text: String, lang: String, onSegmentDone: () -> Unit) {
         val online = NetworkUtils.isOnline(context)
-        if (systemReady) {
+        if (systemReady && tts != null) {
             speakSystem(text, lang, allowOnlineFallback = online, onDone = onSegmentDone)
             return
         }
@@ -131,31 +152,44 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         engine.setSpeechRate(0.95f)
         engine.setPitch(1.05f)
 
+        // Request audio focus so voice is audible
+        try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            @Suppress("DEPRECATION")
+            am.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+        } catch (_: Exception) {}
+
         val lock = Object()
         var finished = false
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
+            override fun onStart(utteranceId: String?) {
+                Log.d(TAG, "TTS start $utteranceId")
+            }
             override fun onDone(utteranceId: String?) {
                 synchronized(lock) { finished = true; lock.notifyAll() }
                 onDone()
             }
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
+                Log.w(TAG, "TTS error $utteranceId")
                 synchronized(lock) { finished = true; lock.notifyAll() }
                 if (allowOnlineFallback) speakOnline(text, lang, onDone) else onDone()
             }
         })
 
-        val params = HashMap<String, String>()
-        params[TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID] = "aria_${System.currentTimeMillis()}"
-        @Suppress("DEPRECATION")
-        val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, params)
+        val utteranceId = "aria_${System.currentTimeMillis()}"
+        val bundle = Bundle().apply {
+            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
+        }
+        val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, bundle, utteranceId)
+        Log.d(TAG, "speak result=$result len=${text.length}")
         if (result == TextToSpeech.ERROR) {
             if (allowOnlineFallback) speakOnline(text, lang, onDone) else onDone()
             return
         }
         synchronized(lock) {
-            if (!finished) try { lock.wait(60_000) } catch (_: InterruptedException) {}
+            if (!finished) try { lock.wait(90_000) } catch (_: InterruptedException) {}
         }
     }
 
@@ -195,6 +229,12 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
             mediaPlayer?.release()
             mediaPlayer = MediaPlayer().apply {
                 setDataSource(file.absolutePath)
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
                 setOnCompletionListener {
                     synchronized(lock) { done = true; lock.notifyAll() }
                 }
@@ -238,20 +278,17 @@ class AriaVoiceEngine(private val context: Context) : TextToSpeech.OnInitListene
         const val SHERPA_PKG = "com.k2fsa.sherpa.onnx.tts.engine"
         const val SHERPA_ENGINES_URL = "https://k2-fsa.github.io/sherpa/onnx/tts/apk-engine.html"
 
-        /**
-         * Keep letters (FA/EN), digits, spaces. Drop stars, parentheses, math, currency, etc.
-         */
         fun sanitizeForSpeech(raw: String): String {
             val sb = StringBuilder(raw.length)
             for (ch in raw) {
                 val keep = when {
                     ch.isLetterOrDigit() -> true
                     ch.isWhitespace() -> true
-                    ch in '\u0600'..'\u06FF' -> true // Arabic/Persian block (letters already covered mostly)
+                    ch in '\u0600'..'\u06FF' -> true
                     ch in '\u0750'..'\u077F' -> true
                     ch in '\uFB50'..'\uFDFF' -> true
                     ch in '\uFE70'..'\uFEFF' -> true
-                    ch == '\u200c' -> true // ZWNJ useful in Persian words
+                    ch == '\u200c' -> true
                     else -> false
                 }
                 if (keep) sb.append(ch) else sb.append(' ')
