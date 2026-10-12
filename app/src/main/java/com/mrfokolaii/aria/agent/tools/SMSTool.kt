@@ -6,6 +6,7 @@ import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 class SMSTool(private val context: Context) : AgentTool {
     override val name = "sms"
@@ -90,6 +91,14 @@ class SMSTool(private val context: Context) : AgentTool {
             } catch (_: Exception) {}
         }
     }
+
+    override suspend fun healthCheck(): HealthStatus =
+        HealthStatus(true, 0, "SMS tool ready")
+
+    override fun getParamsSchema(): JSONObject = JSONObject()
+        .put("phone_number", "string?")
+        .put("contact_name", "string?")
+        .put("message", "string?")
 
     companion object {
         private const val TAG = "SMSTool"
