@@ -16,7 +16,7 @@ import java.io.File
 class OfflineLlmEngine(private val context: Context) {
 
     private val mutex = Mutex()
-    @Volatile private var modelHandle: Long? = null
+    @Volatile private var modelHandle: Any? = null
     @Volatile private var loadError: String? = null
 
     fun modelFile(): File =
@@ -24,7 +24,7 @@ class OfflineLlmEngine(private val context: Context) {
 
     fun isModelPresent(): Boolean {
         val f = modelFile()
-        return f.exists() && f.length() > 50_000_000L // >50MB sanity
+        return f.exists() && f.length() > 50_000_000L
     }
 
     fun modelStatusText(): String {
@@ -34,7 +34,7 @@ class OfflineLlmEngine(private val context: Context) {
             f.length() < 50_000_000L -> "فایل مدل ناقص است — دوباره دانلود کن"
             modelHandle != null -> "مدل آفلاین آماده است"
             loadError != null -> "خطا در بارگذاری: $loadError"
-            else -> "مدل موجود است — در حال آماده‌سازی..."
+            else -> "مدل موجود است — آماده بارگذاری"
         }
     }
 
@@ -71,7 +71,9 @@ class OfflineLlmEngine(private val context: Context) {
         history: List<Pair<String, String>> = emptyList()
     ): String = withContext(Dispatchers.IO) {
         if (!ensureLoaded()) {
-            return@withContext "مدل آفلاین آماده نیست. از تنظیمات مدل Qwen را دانلود کن (حدود ۱ گیگ)."
+            return@withContext "مدل آفلاین آماده نیست.\n" +
+                "فایل Qwen را دانلود کن و در پوشه مدل اپ بگذار:\n" +
+                modelFile().absolutePath
         }
         val handle = modelHandle ?: return@withContext "مدل بارگذاری نشد."
 
@@ -85,13 +87,28 @@ class OfflineLlmEngine(private val context: Context) {
 
         try {
             mutex.withLock {
+                @Suppress("UNCHECKED_CAST")
                 val result = Llama.complete(
-                    handle,
+                    handle as dev.ffmpegkit.llama.LlamaModel,
                     prompt = prompt,
                     systemPrompt = SYSTEM_PROMPT,
                     maxTokens = 256
                 )
                 result.text.trim().ifBlank { "پاسخی تولید نشد." }
+            }
+        } catch (e: ClassCastException) {
+            // Fallback if type name differs across library versions
+            try {
+                val complete = Llama::class.java.methods.first {
+                    it.name == "complete" && it.parameterTypes.size >= 2
+                }
+                val result = complete.invoke(null, handle, prompt, SYSTEM_PROMPT, 256)
+                val text = result?.javaClass?.getMethod("getText")?.invoke(result)
+                    ?: result?.javaClass?.getField("text")?.get(result)
+                text?.toString()?.trim()?.ifBlank { "پاسخی تولید نشد." } ?: "پاسخی تولید نشد."
+            } catch (e2: Exception) {
+                Log.e(TAG, "complete failed", e2)
+                "خطا در مدل آفلاین: ${e2.message}"
             }
         } catch (e: Exception) {
             Log.e(TAG, "complete failed", e)
@@ -102,8 +119,11 @@ class OfflineLlmEngine(private val context: Context) {
     fun release() {
         val h = modelHandle ?: return
         try {
-            Llama.releaseModel(h)
+            Llama.releaseModel(h as dev.ffmpegkit.llama.LlamaModel)
         } catch (_: Exception) {
+            try {
+                Llama::class.java.methods.first { it.name == "releaseModel" }.invoke(null, h)
+            } catch (_: Exception) {}
         }
         modelHandle = null
     }
@@ -113,7 +133,6 @@ class OfflineLlmEngine(private val context: Context) {
         const val MODELS_DIR = "models"
         const val MODEL_FILE_NAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
-        /** Official Qwen GGUF (~1.12 GB) */
         const val MODEL_DOWNLOAD_URL =
             "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
