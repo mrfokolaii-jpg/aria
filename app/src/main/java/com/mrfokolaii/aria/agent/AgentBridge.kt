@@ -60,7 +60,12 @@ class AgentBridge(
             return@withContext if (toolResult.success) {
                 val reply = if (online) {
                     try {
-                        generateResponseWithToolData(userInput, toolResult)
+                        // For simple open/launch, prefer short offline reply (no extra API call)
+                        if (toolIntent.toolName in setOf("web_browse", "app_launcher", "phone_call", "sms")) {
+                            offlineToolReply(toolIntent.toolName, toolResult)
+                        } else {
+                            generateResponseWithToolData(userInput, toolResult)
+                        }
                     } catch (_: Exception) {
                         offlineToolReply(toolIntent.toolName, toolResult)
                     }
@@ -87,7 +92,8 @@ class AgentBridge(
     }
 
     private fun isOnlineOnlyTool(name: String): Boolean = when (name) {
-        "web_search", "web_browse", "github_search", "youtube_search",
+        // web_browse opens system browser and can work without our network fetch
+        "web_search", "github_search", "youtube_search",
         "reddit_search", "rss_reader", "instagram_search", "bilibili_search" -> true
         else -> false
     }
@@ -112,6 +118,10 @@ class AgentBridge(
             "sms" -> {
                 val map = data as? Map<*, *>
                 map?.get("message")?.toString() ?: "پیامک باز شد."
+            }
+            "web_browse" -> {
+                val map = data as? Map<*, *>
+                map?.get("message")?.toString() ?: "سایت در مرورگر باز شد."
             }
             "accessibility_control" -> {
                 when (data) {
@@ -186,6 +196,16 @@ class AgentBridge(
             return ToolIntent("sms", params)
         }
 
+        // --- Open known websites (must run before generic app launch) ---
+        val siteUrl = resolveKnownSite(input)
+        if (siteUrl != null) {
+            return ToolIntent("web_browse", mapOf("action" to "open", "url" to siteUrl))
+        }
+
+        if (containsAny(lower, "مرورگر", "browser", "براوزر")) {
+            return ToolIntent("app_launcher", mapOf("action" to "launch", "app_name" to "مرورگر"))
+        }
+
         when {
             containsAny(lower, "روبیکا", "rubika") ->
                 return ToolIntent("app_launcher", mapOf("action" to "launch", "app_name" to "روبیکا"))
@@ -251,12 +271,28 @@ class AgentBridge(
             return ToolIntent("web_search", mapOf("query" to extractQuery(input)), useRouter = true)
         }
 
-        if (containsAny(lower, "سایت", "browse", "http")) {
-            val url = extractUrl(input)
-            if (url != null) return ToolIntent("web_browse", mapOf("url" to url), useRouter = true)
+        if (containsAny(lower, "سایت", "browse", "http", "باز کن", "بیار", "برو")) {
+            val url = extractUrl(input) ?: resolveKnownSite(input)
+            if (url != null) {
+                return ToolIntent("web_browse", mapOf("action" to "open", "url" to url))
+            }
         }
 
         return null
+    }
+
+    private fun resolveKnownSite(input: String): String? {
+        val lower = input.lowercase().replace("‌", "").replace(" ", "")
+        return when {
+            lower.contains("github") || lower.contains("گیتهاب") || lower.contains("گیت‌هاب")
+                || lower.contains("گیتهب") || lower.contains("گیتا") -> "https://github.com"
+            lower.contains("google") || lower.contains("گوگل") -> "https://www.google.com"
+            lower.contains("youtube") || lower.contains("یوتیوب") || lower.contains("یوتوب") -> "https://www.youtube.com"
+            lower.contains("openai") || lower.contains("chatgpt") -> "https://chatgpt.com"
+            lower.contains("groq") -> "https://console.groq.com"
+            lower.contains("openrouter") -> "https://openrouter.ai"
+            else -> null
+        }
     }
 
     private fun extractQuery(input: String): String =
