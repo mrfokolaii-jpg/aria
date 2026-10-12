@@ -40,7 +40,7 @@ class AgentToolManager(private val context: android.content.Context? = null) {
         }
 
         safeRegister(WebSearchTool(client))
-        safeRegister(WebBrowseTool(client))
+        context?.let { safeRegister(WebBrowseTool(it, client)) }
         safeRegister(GitHubTool(client, context))
         safeRegister(YouTubeTool(client))
         safeRegister(RedditTool(client))
