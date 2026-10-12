@@ -54,6 +54,7 @@ class MainActivity : AppCompatActivity() {
     private fun requestAllPermissionsFirstRun() {
         val perms = mutableListOf(
             Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.READ_CONTACTS,
             Manifest.permission.INTERNET,
             Manifest.permission.ACCESS_NETWORK_STATE
         )
@@ -134,7 +135,6 @@ class MainActivity : AppCompatActivity() {
         })
         root.addView(actions)
 
-        // Widget near top
         root.addView(TextView(this).apply {
             text = "ویجت"
             textSize = 16f
@@ -165,7 +165,6 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        // TTS — follows phone default engine
         root.addView(TextView(this).apply {
             text = "صدای فارسی / TTS"
             textSize = 16f
@@ -202,7 +201,7 @@ class MainActivity : AppCompatActivity() {
         })
         root.addView(ttsRow)
         root.addView(TextView(this).apply {
-            text = "صدا وابسته به نام فایل نیست: از تنظیمات TTS گوشی موتور را عوض کنید، اپ همان را استفاده می‌کند. دکمه آبی لیست موتورهای Sherpa را باز می‌کند."
+            text = "صدا وابسته به نام فایل نیست: از تنظیمات TTS گوشی موتور را عوض کنید، اپ همان را استفاده می‌کند."
             textSize = 11f
             setTextColor(Color.GRAY)
             setPadding(0, 6, 0, 14)
