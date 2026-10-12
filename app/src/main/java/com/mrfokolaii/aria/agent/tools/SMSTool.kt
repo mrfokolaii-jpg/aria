@@ -1,53 +1,94 @@
 package com.mrfokolaii.aria.agent.tools
 
 import android.content.Context
-import android.telephony.SmsManager
+import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 
 class SMSTool(private val context: Context) : AgentTool {
     override val name = "sms"
-    override val description = "Send SMS messages"
+    override val description = "Open SMS app and compose message to a number or contact name"
     override val category = ToolCategory.SYSTEM
 
+    private val phoneTool = PhoneTool(context)
+
     override suspend fun execute(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
-        val phoneNumber = params["phone_number"]?.toString()
-            ?: return@withContext ToolResult(false, null, "phone_number is required")
-        val message = params["message"]?.toString()
-            ?: return@withContext ToolResult(false, null, "message is required")
+        val phoneNumber = params["phone_number"]?.toString()?.trim()
+        val contactName = params["contact_name"]?.toString()?.trim()
+        val message = params["message"]?.toString()?.trim() ?: params["body"]?.toString()?.trim()
 
         try {
-            val smsManager = SmsManager.getDefault()
-            smsManager.sendTextMessage(phoneNumber, null, message, null, null)
-            ToolResult(true, mapOf("status" to "sent", "to" to phoneNumber))
-        } catch (e: SecurityException) {
-            Log.e(TAG, "SMS permission denied", e)
-            ToolResult(false, null, "SMS permission required")
+            var target = phoneNumber
+            var resolvedName: String? = null
+
+            if (target.isNullOrBlank() && !contactName.isNullOrBlank()) {
+                val matches = phoneTool.findContacts(contactName)
+                if (matches.isEmpty()) {
+                    openSmsApp()
+                    return@withContext ToolResult(
+                        true,
+                        mapOf(
+                            "status" to "not_found",
+                            "message" to "مخاطب «$contactName» پیدا نشد. برنامه پیامک باز شد."
+                        )
+                    )
+                }
+                target = matches.first().second
+                resolvedName = matches.first().first
+            }
+
+            if (target.isNullOrBlank()) {
+                openSmsApp()
+                return@withContext ToolResult(
+                    true,
+                    mapOf("status" to "sms_opened", "message" to "برنامه پیامک باز شد")
+                )
+            }
+
+            val uri = Uri.parse("smsto:$target")
+            val intent = Intent(Intent.ACTION_SENDTO, uri).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                if (!message.isNullOrBlank()) {
+                    putExtra("sms_body", message)
+                    putExtra(Intent.EXTRA_TEXT, message)
+                }
+            }
+            context.startActivity(intent)
+
+            val who = resolvedName ?: target
+            val bodyHint = if (!message.isNullOrBlank()) " با متن آماده" else ""
+            ToolResult(
+                true,
+                mapOf(
+                    "status" to "compose",
+                    "to" to who,
+                    "number" to target,
+                    "message" to "پیامک به $who$bodyHint باز شد"
+                )
+            )
         } catch (e: Exception) {
-            Log.e(TAG, "SMS send failed", e)
-            ToolResult(false, null, "Send failed: ${e.message}")
+            Log.e(TAG, "SMS failed", e)
+            ToolResult(false, null, "خطا در پیامک: ${e.message}")
         }
     }
 
-    override suspend fun healthCheck(): HealthStatus = withContext(Dispatchers.IO) {
-        HealthStatus(
-            isHealthy = true,
-            latencyMs = 0,
-            message = "SMS tool ready"
-        )
-    }
-
-    override fun getParamsSchema(): JSONObject = JSONObject().apply {
-        put("phone_number", JSONObject().apply {
-            put("type", "string")
-            put("required", true)
-        })
-        put("message", JSONObject().apply {
-            put("type", "string")
-            put("required", true)
-        })
+    private fun openSmsApp() {
+        try {
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_APP_MESSAGING)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+        } catch (_: Exception) {
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("sms:")).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(intent)
+            } catch (_: Exception) {}
+        }
     }
 
     companion object {
