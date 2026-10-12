@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 class AppLauncherTool(private val context: Context) : AgentTool {
     override val name = "app_launcher"
@@ -79,35 +80,6 @@ class AppLauncherTool(private val context: Context) : AgentTool {
 
     private fun resolveKnownPackage(name: String): String? {
         val key = name.lowercase().replace(" ", "").replace("‌", "")
-        val map = mapOf(
-            // Iranian messengers
-            "روبیکا" to "ir.mservices.market",
-            "rubika" to "app.rubika",
-            "بله" to "com.sabaidea.bale",
-            "bale" to "com.sabaidea.bale",
-            "ایتا" to "ir.eitaa.messenger",
-            "eitaa" to "ir.eitaa.messenger",
-            // Global
-            "تلگرام" to "org.telegram.messenger",
-            "telegram" to "org.telegram.messenger",
-            "واتساپ" to "com.whatsapp",
-            "واتساپ" to "com.whatsapp",
-            "whatsapp" to "com.whatsapp",
-            "اینستاگرام" to "com.instagram.android",
-            "اینستا" to "com.instagram.android",
-            "instagram" to "com.instagram.android",
-            "کروم" to "com.android.chrome",
-            "chrome" to "com.android.chrome",
-            "گوگلکروم" to "com.android.chrome",
-            "فایرفاکس" to "org.mozilla.firefox",
-            "firefox" to "org.mozilla.firefox",
-            "فایر فاکس" to "org.mozilla.firefox",
-            // VPN common
-            "vpn" to null, // resolved by search
-            "وی‌پی‌ان" to null,
-            "ویپیان" to null
-        )
-        // Direct package if installed
         val candidates = when {
             key.contains("روبیکا") || key.contains("rubika") ->
                 listOf("app.rubika", "ir.mservices.market", "com.rubika")
@@ -171,12 +143,22 @@ class AppLauncherTool(private val context: Context) : AgentTool {
             if (labelNorm == q || labelNorm.contains(q) || q.contains(labelNorm)) {
                 return pkg
             }
-            if (best == null && (labelNorm.startsWith(q.take(3)) || q.startsWith(labelNorm.take(3)))) {
+            if (best == null && q.length >= 2 &&
+                (labelNorm.startsWith(q.take(3)) || q.startsWith(labelNorm.take(3)))
+            ) {
                 best = pkg
             }
         }
         return best
     }
+
+    override suspend fun healthCheck(): HealthStatus =
+        HealthStatus(true, 0, "App launcher ready")
+
+    override fun getParamsSchema(): JSONObject = JSONObject()
+        .put("action", "launch|list")
+        .put("app_name", "string?")
+        .put("package_name", "string?")
 
     companion object {
         private const val TAG = "AppLauncherTool"
