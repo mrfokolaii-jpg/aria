@@ -2,8 +2,6 @@ package com.mrfokolaii.aria.agent
 
 import android.content.Context
 import android.util.Log
-import dev.ffmpegkit.llama.Llama
-import dev.ffmpegkit.llama.LlamaConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -12,6 +10,7 @@ import java.io.File
 
 /**
  * On-device chat with Qwen2.5-1.5B-Instruct GGUF (no API key).
+ * Uses llama-android (dev.ffmpegkit.llama.Llama) via reflective calls for API stability.
  */
 class OfflineLlmEngine(private val context: Context) {
 
@@ -30,7 +29,7 @@ class OfflineLlmEngine(private val context: Context) {
     fun modelStatusText(): String {
         val f = modelFile()
         return when {
-            !f.exists() -> "مدل نصب نیست — از تنظیمات دانلود کن"
+            !f.exists() -> "مدل نصب نیست — فایل GGUF را دانلود کن"
             f.length() < 50_000_000L -> "فایل مدل ناقص است — دوباره دانلود کن"
             modelHandle != null -> "مدل آفلاین آماده است"
             loadError != null -> "خطا در بارگذاری: $loadError"
@@ -47,13 +46,20 @@ class OfflineLlmEngine(private val context: Context) {
                 return@withContext false
             }
             try {
-                val handle = Llama.loadModel(
-                    modelPath = f.absolutePath,
-                    config = LlamaConfig(
-                        contextSize = 2048,
-                        threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
-                    )
-                )
+                val llamaClass = Class.forName("dev.ffmpegkit.llama.Llama")
+                val configClass = Class.forName("dev.ffmpegkit.llama.LlamaConfig")
+                val config = try {
+                    configClass.getConstructor(Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+                        .newInstance(2048, Runtime.getRuntime().availableProcessors().coerceIn(2, 6))
+                } catch (_: Exception) {
+                    configClass.getDeclaredConstructor().newInstance()
+                }
+                val load = llamaClass.methods.first { it.name == "loadModel" }
+                val handle = when (load.parameterTypes.size) {
+                    2 -> load.invoke(null, f.absolutePath, config)
+                    1 -> load.invoke(null, f.absolutePath)
+                    else -> load.invoke(null, f.absolutePath, config)
+                }
                 modelHandle = handle
                 loadError = null
                 Log.i(TAG, "Model loaded: ${f.length() / 1_000_000}MB")
@@ -72,8 +78,8 @@ class OfflineLlmEngine(private val context: Context) {
     ): String = withContext(Dispatchers.IO) {
         if (!ensureLoaded()) {
             return@withContext "مدل آفلاین آماده نیست.\n" +
-                "فایل Qwen را دانلود کن و در پوشه مدل اپ بگذار:\n" +
-                modelFile().absolutePath
+                "لینک دانلود:\n$MODEL_DOWNLOAD_URL\n\n" +
+                "فایل را با این نام ذخیره کن:\n${modelFile().absolutePath}"
         }
         val handle = modelHandle ?: return@withContext "مدل بارگذاری نشد."
 
@@ -87,28 +93,25 @@ class OfflineLlmEngine(private val context: Context) {
 
         try {
             mutex.withLock {
-                @Suppress("UNCHECKED_CAST")
-                val result = Llama.complete(
-                    handle as dev.ffmpegkit.llama.LlamaModel,
-                    prompt = prompt,
-                    systemPrompt = SYSTEM_PROMPT,
-                    maxTokens = 256
-                )
-                result.text.trim().ifBlank { "پاسخی تولید نشد." }
-            }
-        } catch (e: ClassCastException) {
-            // Fallback if type name differs across library versions
-            try {
-                val complete = Llama::class.java.methods.first {
-                    it.name == "complete" && it.parameterTypes.size >= 2
+                val llamaClass = Class.forName("dev.ffmpegkit.llama.Llama")
+                val completeMethods = llamaClass.methods.filter { it.name == "complete" }
+                var result: Any? = null
+                var lastErr: Exception? = null
+                for (m in completeMethods) {
+                    try {
+                        result = when (m.parameterTypes.size) {
+                            4 -> m.invoke(null, handle, prompt, SYSTEM_PROMPT, 256)
+                            3 -> m.invoke(null, handle, prompt, 256)
+                            2 -> m.invoke(null, handle, prompt)
+                            else -> continue
+                        }
+                        break
+                    } catch (e: Exception) {
+                        lastErr = e
+                    }
                 }
-                val result = complete.invoke(null, handle, prompt, SYSTEM_PROMPT, 256)
-                val text = result?.javaClass?.getMethod("getText")?.invoke(result)
-                    ?: result?.javaClass?.getField("text")?.get(result)
-                text?.toString()?.trim()?.ifBlank { "پاسخی تولید نشد." } ?: "پاسخی تولید نشد."
-            } catch (e2: Exception) {
-                Log.e(TAG, "complete failed", e2)
-                "خطا در مدل آفلاین: ${e2.message}"
+                if (result == null) throw lastErr ?: Exception("complete not found")
+                extractText(result).ifBlank { "پاسخی تولید نشد." }
             }
         } catch (e: Exception) {
             Log.e(TAG, "complete failed", e)
@@ -116,14 +119,26 @@ class OfflineLlmEngine(private val context: Context) {
         }
     }
 
+    private fun extractText(result: Any): String {
+        return try {
+            val f = result.javaClass.getDeclaredField("text")
+            f.isAccessible = true
+            f.get(result)?.toString()?.trim().orEmpty()
+        } catch (_: Exception) {
+            try {
+                result.javaClass.getMethod("getText").invoke(result)?.toString()?.trim().orEmpty()
+            } catch (_: Exception) {
+                result.toString()
+            }
+        }
+    }
+
     fun release() {
         val h = modelHandle ?: return
         try {
-            Llama.releaseModel(h as dev.ffmpegkit.llama.LlamaModel)
+            val llamaClass = Class.forName("dev.ffmpegkit.llama.Llama")
+            llamaClass.methods.first { it.name == "releaseModel" }.invoke(null, h)
         } catch (_: Exception) {
-            try {
-                Llama::class.java.methods.first { it.name == "releaseModel" }.invoke(null, h)
-            } catch (_: Exception) {}
         }
         modelHandle = null
     }
@@ -133,6 +148,7 @@ class OfflineLlmEngine(private val context: Context) {
         const val MODELS_DIR = "models"
         const val MODEL_FILE_NAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
+        /** ~1.12 GB — دانلود مستقیم */
         const val MODEL_DOWNLOAD_URL =
             "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
