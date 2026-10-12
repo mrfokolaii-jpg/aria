@@ -7,6 +7,7 @@ import android.provider.ContactsContract
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 class PhoneTool(private val context: Context) : AgentTool {
     override val name = "phone_call"
@@ -74,7 +75,6 @@ class PhoneTool(private val context: Context) : AgentTool {
     private fun searchAndDial(name: String): ToolResult {
         val matches = findContacts(name)
         if (matches.isEmpty()) {
-            // Open contacts app so user can find manually
             try {
                 val intent = Intent(Intent.ACTION_VIEW, ContactsContract.Contacts.CONTENT_URI).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -110,7 +110,6 @@ class PhoneTool(private val context: Context) : AgentTool {
         )
     }
 
-    /** Returns list of (displayName, phoneNumber) */
     fun findContacts(query: String): List<Pair<String, String>> {
         val out = mutableListOf<Pair<String, String>>()
         try {
@@ -137,6 +136,14 @@ class PhoneTool(private val context: Context) : AgentTool {
         }
         return out
     }
+
+    override suspend fun healthCheck(): HealthStatus =
+        HealthStatus(true, 0, "Phone tool ready")
+
+    override fun getParamsSchema(): JSONObject = JSONObject()
+        .put("action", "contacts|search|dialer|call")
+        .put("phone_number", "string?")
+        .put("contact_name", "string?")
 
     companion object {
         private const val TAG = "PhoneTool"
