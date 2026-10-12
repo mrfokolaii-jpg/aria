@@ -20,6 +20,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.mrfokolaii.aria.agent.AgentBridge
+import com.mrfokolaii.aria.agent.AgentResponse
 import com.mrfokolaii.aria.agent.UnoRouterProvider
 import com.mrfokolaii.aria.memory.ChatHistoryStore
 import com.mrfokolaii.aria.memory.PersistentMemory
@@ -64,17 +65,18 @@ class ChatActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        initBridge() // reload keys after returning from settings
         reloadBubbles()
     }
 
     private fun initBridge() {
         val prefs = getSharedPreferences("aria", MODE_PRIVATE)
-        val provider = prefs.getString("active_provider", "groq") ?: "groq"
-        val (key, endpoint, model) = when (provider) {
+
+        fun load(provider: String): Triple<String, String, String> = when (provider) {
             "openrouter" -> Triple(
                 prefs.getString("openrouter_api_key", "") ?: "",
                 UnoRouterProvider.OPENROUTER_BASE,
-                prefs.getString("openrouter_model", "google/gemini-flash-1.5") ?: "google/gemini-flash-1.5"
+                prefs.getString("openrouter_model", "openrouter/free") ?: "openrouter/free"
             )
             "xai" -> Triple(
                 prefs.getString("xai_api_key", "") ?: "",
@@ -92,6 +94,25 @@ class ChatActivity : AppCompatActivity() {
                 prefs.getString("groq_model", "openai/gpt-oss-20b") ?: "openai/gpt-oss-20b"
             )
         }
+
+        var provider = prefs.getString("active_provider", "groq") ?: "groq"
+        var (key, endpoint, model) = load(provider)
+
+        // If active provider has no key, pick first available
+        if (key.isBlank()) {
+            for (p in listOf("groq", "openrouter", "xai", "custom")) {
+                val t = load(p)
+                if (t.first.isNotBlank()) {
+                    provider = p
+                    key = t.first
+                    endpoint = t.second
+                    model = t.third
+                    prefs.edit().putString("active_provider", p).apply()
+                    break
+                }
+            }
+        }
+
         agentBridge = AgentBridge(this, key, endpoint, model)
     }
 
@@ -120,18 +141,15 @@ class ChatActivity : AppCompatActivity() {
         })
         toolbar.addView(Button(this).apply {
             text = "پاک"
-            textSize = 12f
             setBackgroundColor(Color.parseColor("#2A2A40"))
             setTextColor(Color.WHITE)
             setOnClickListener {
                 chatStore.clear()
-                reloadBubbles()
-                addBubble("assistant", "تاریخچه پاک شد.", "chat")
+                chatContainer.removeAllViews()
             }
         })
         toolbar.addView(Button(this).apply {
             text = "⚙"
-            textSize = 14f
             setBackgroundColor(Color.parseColor("#2A2A40"))
             setTextColor(Color.WHITE)
             setOnClickListener {
@@ -148,55 +166,46 @@ class ChatActivity : AppCompatActivity() {
         }
         chatContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(14, 14, 14, 14)
+            setPadding(16, 12, 16, 12)
         }
         scrollView.addView(chatContainer)
         root.addView(scrollView)
 
-        val inputBar = LinearLayout(this).apply {
+        val inputRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#16162A"))
-            setPadding(12, 14, 12, 14)
+            setPadding(12, 12, 12, 12)
             gravity = Gravity.CENTER_VERTICAL
         }
-
-        inputBar.addView(Button(this).apply {
+        inputRow.addView(Button(this).apply {
             text = "📎"
-            textSize = 16f
             setBackgroundColor(Color.parseColor("#2A2A40"))
             setTextColor(Color.WHITE)
             setOnClickListener { filePicker.launch("*/*") }
         })
-
         inputField = EditText(this).apply {
             hint = "پیام خود را بنویسید..."
             setHintTextColor(Color.GRAY)
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#252540"))
-            setPadding(22, 18, 22, 18)
-            minHeight = 52
-            maxLines = 5
+            setPadding(20, 16, 20, 16)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = 8
                 marginEnd = 8
             }
         }
-        inputBar.addView(inputField)
-
-        inputBar.addView(Button(this).apply {
+        inputRow.addView(inputField)
+        inputRow.addView(Button(this).apply {
             text = "➤"
-            textSize = 18f
             setBackgroundColor(Color.parseColor("#00C853"))
             setTextColor(Color.WHITE)
             setOnClickListener { sendMessage() }
         })
-
-        root.addView(inputBar)
+        root.addView(inputRow)
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
-            v.setPadding(0, bars.top, 0, maxOf(bars.bottom, ime.bottom))
+            v.setPadding(0, bars.top, 0, bars.bottom)
             insets
         }
 
@@ -204,23 +213,14 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun loadHistory() {
-        reloadBubbles()
-        if (chatStore.messageCount() == 0) {
-            addBubble(
-                "assistant",
-                "سلام! من آریا هستم. بنویس یا از ویجت صحبت کن.",
-                "chat"
-            )
-        }
-    }
-
-    private fun reloadBubbles() {
-        if (!::chatContainer.isInitialized) return
-        chatContainer.removeAllViews()
         chatStore.loadAll().forEach { msg ->
             addBubble(msg.role, msg.text, msg.source, scroll = false)
         }
         scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun reloadBubbles() {
+        // keep history as-is; bridge already refreshed
     }
 
     private fun sendMessage() {
@@ -247,10 +247,11 @@ class ChatActivity : AppCompatActivity() {
 
         scope.launch {
             try {
+                initBridge()
                 val history = chatStore.loadAll().map { it.role to it.text }.takeLast(20)
                 val response = withContext(Dispatchers.IO) {
                     agentBridge?.processWithAgentTools(display, history)
-                        ?: com.mrfokolaii.aria.agent.AgentResponse("پل ارتباطی آماده نیست.")
+                        ?: AgentResponse("پل ارتباطی آماده نیست.")
                 }
                 chatStore.append("assistant", response.text, "chat")
                 updateBubble(thinking, response.text)
@@ -270,12 +271,12 @@ class ChatActivity : AppCompatActivity() {
             when (data) {
                 is Map<*, *> -> {
                     val url = data["url"]?.toString()
-                    if (url != null) {
+                    if (!url.isNullOrBlank()) {
                         knowledgeMemory.saveSite(
                             url = url,
                             title = data["title"]?.toString() ?: url,
-                            categories = listOf("chat"),
-                            features = listOf("linked"),
+                            categories = listOf("search"),
+                            features = listOf("search_result"),
                             summary = data["description"]?.toString() ?: data["snippet"]?.toString() ?: ""
                         )
                     }
