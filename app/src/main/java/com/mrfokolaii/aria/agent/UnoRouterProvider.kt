@@ -41,18 +41,27 @@ class UnoRouterProvider(
             val url = if (base.endsWith("/chat/completions")) base
             else "$base/chat/completions"
 
+            // Normalize known-bad / empty model ids to safer defaults
+            val effectiveModel = when {
+                model.isBlank() -> "llama-3.1-8b-instant"
+                model.equals("openrouter/free", ignoreCase = true) -> "openrouter/auto"
+                model.contains("gpt-oss", ignoreCase = true) -> model // keep user choice but may 400
+                else -> model
+            }
+
             val messages = JSONArray()
             messages.put(JSONObject().put("role", "system").put("content", systemPrompt))
 
-            history.takeLast(40).forEach { (role, content) ->
+            history.takeLast(20).forEach { (role, content) ->
                 val r = if (role == "user") "user" else "assistant"
+                if (content.isBlank()) return@forEach
                 if (r == "user" && content == userMessage) return@forEach
-                messages.put(JSONObject().put("role", r).put("content", content))
+                messages.put(JSONObject().put("role", r).put("content", content.take(2000)))
             }
-            messages.put(JSONObject().put("role", "user").put("content", userMessage))
+            messages.put(JSONObject().put("role", "user").put("content", userMessage.take(4000)))
 
             val body = JSONObject()
-                .put("model", model)
+                .put("model", effectiveModel)
                 .put("messages", messages)
                 .put("max_tokens", 1024)
                 .put("temperature", 0.7)
@@ -71,8 +80,16 @@ class UnoRouterProvider(
                 val raw = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     Log.e(TAG, "HTTP ${response.code}: $raw")
+                    val hint = when (response.code) {
+                        400 -> "درخواست رد شد (۴۰۰). معمولاً نام مدل اشتباه است. در تنظیمات مدل را به مثلاً llama-3.3-70b-versatile یا llama-3.1-8b-instant عوض کن."
+                        401, 403 -> "کلید API نامعتبر است یا دسترسی ندارد."
+                        404 -> "آدرس یا مدل پیدا نشد (۴۰۴)."
+                        429 -> "محدودیت تعداد درخواست. کمی صبر کن."
+                        else -> "خطا در ارتباط با هوش مصنوعی (کد ${response.code})."
+                    }
+                    val detail = raw.take(180).replace("\n", " ")
                     return ChatResponse(
-                        "خطا در ارتباط با هوش مصنوعی (کد ${response.code}). کلید و مدل را بررسی کنید.",
+                        if (detail.isNotBlank()) "$hint\n$detail" else hint,
                         model
                     )
                 }
@@ -80,10 +97,9 @@ class UnoRouterProvider(
                 val text = json.optJSONArray("choices")
                     ?.optJSONObject(0)
                     ?.optJSONObject("message")
-                    ?.optString("content", "")
+                    ?.optString("content")
                     ?.trim()
                     .orEmpty()
-
                 if (text.isBlank()) {
                     ChatResponse("پاسخ خالی از مدل دریافت شد.", model)
                 } else {
@@ -140,7 +156,7 @@ class UnoRouterProvider(
 تو آریا هستی، یک دستیار هوشمند فارسی‌زبان روی اندروید.
 پاسخ‌هایت را کوتاه، واضح و دوستانه به فارسی بده.
 تاریخچه مکالمه به تو داده می‌شود؛ همیشه آن را در نظر بگیر و چیزی را فراموش نکن.
-اگر نیاز به ابزار داری (جستجو، باز کردن برنامه و ...) مستقیم و شفاف عمل کن.
+اگر کاربر دستور اجرایی داد (باز کردن برنامه، تماس، سایت) فرض کن ابزار اجرا شده و فقط نتیجه کوتاه بگو؛ راهنمای برنامه‌نویسی نده.
 """.trim()
 
         const val GROQ_BASE = "https://api.groq.com/openai/v1"
