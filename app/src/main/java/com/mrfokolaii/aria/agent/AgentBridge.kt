@@ -7,6 +7,13 @@ import com.mrfokolaii.aria.util.NetworkUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+/** Response from AgentBridge processWithAgentTools */
+data class AgentResponse(
+    val text: String,
+    val toolUsed: String? = null,
+    val toolResult: ToolResult? = null
+)
+
 /**
  * Bridge between ARIA service and Agent Tools.
  * Online: AI + web tools. Offline: local device tools still work.
@@ -60,7 +67,7 @@ class AgentBridge(
                 } else {
                     offlineToolReply(toolIntent.toolName, toolResult)
                 }
-                AgentResponse(text = reply, toolUsed = toolIntent.toolName)
+                AgentResponse(text = reply, toolUsed = toolIntent.toolName, toolResult = toolResult)
             } else {
                 AgentResponse(
                     text = toolResult.error ?: "انجام نشد. دوباره بگو."
@@ -68,7 +75,6 @@ class AgentBridge(
             }
         }
 
-        // No tool matched — chat with AI if online
         if (!online) {
             return@withContext AgentResponse(
                 text = "متوجه نشدم. می‌تونی بگی مثلاً: روبیکا رو باز کن، به علی زنگ بزن، پیامک بفرست، یا کروم رو باز کن."
@@ -303,13 +309,10 @@ class AgentBridge(
 
     fun listTools(): String {
         val tools = toolManager.listAllTools()
-        return tools.joinToString("\n") { "- ${it.name}: ${it.description}" }
+        return tools.joinToString("\n") { t ->
+            "- ${t["name"]}: ${t["description"]}"
+        }
     }
-
-    data class AgentResponse(
-        val text: String,
-        val toolUsed: String? = null
-    )
 
     private data class ToolIntent(
         val toolName: String,
