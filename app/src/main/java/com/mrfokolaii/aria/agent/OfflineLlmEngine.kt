@@ -1,6 +1,7 @@
 package com.mrfokolaii.aria.agent
 
 import android.content.Context
+import android.os.Environment
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -10,7 +11,7 @@ import java.io.File
 
 /**
  * On-device chat with Qwen2.5-1.5B-Instruct GGUF (no API key).
- * Uses llama-android (dev.ffmpegkit.llama.Llama) via reflective calls for API stability.
+ * Looks for the model in app storage OR public Download folder.
  */
 class OfflineLlmEngine(private val context: Context) {
 
@@ -18,30 +19,55 @@ class OfflineLlmEngine(private val context: Context) {
     @Volatile private var modelHandle: Any? = null
     @Volatile private var loadError: String? = null
 
-    fun modelFile(): File =
-        File(context.getExternalFilesDir(MODELS_DIR) ?: context.filesDir, MODEL_FILE_NAME)
+    /** All places we accept the GGUF file (first existing wins). */
+    fun candidateModelFiles(): List<File> {
+        val name = MODEL_FILE_NAME
+        val list = mutableListOf<File>()
 
-    fun isModelPresent(): Boolean {
-        val f = modelFile()
-        return f.exists() && f.length() > 50_000_000L
+        // 1) App private models dir
+        context.getExternalFilesDir(MODELS_DIR)?.let { list.add(File(it, name)) }
+        list.add(File(context.filesDir, "$MODELS_DIR/$name"))
+
+        // 2) Public Download (easiest for user to copy)
+        try {
+            val dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            list.add(File(dl, name))
+            list.add(File(dl, "Aria/$name"))
+            list.add(File(dl, "aria/$name"))
+        } catch (_: Exception) {}
+
+        // 3) Common absolute paths on many phones
+        list.add(File("/storage/emulated/0/Download/$name"))
+        list.add(File("/storage/emulated/0/Download/Aria/$name"))
+        list.add(File("/sdcard/Download/$name"))
+
+        return list.distinctBy { it.absolutePath }
     }
 
+    /** First existing valid model file, or preferred target path for messages. */
+    fun modelFile(): File {
+        return candidateModelFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
+            ?: candidateModelFiles().first()
+    }
+
+    fun isModelPresent(): Boolean =
+        candidateModelFiles().any { it.exists() && it.length() > 50_000_000L }
+
     fun modelStatusText(): String {
-        val f = modelFile()
+        val found = candidateModelFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
         return when {
-            !f.exists() -> "مدل نصب نیست — فایل GGUF را دانلود کن"
-            f.length() < 50_000_000L -> "فایل مدل ناقص است — دوباره دانلود کن"
-            modelHandle != null -> "مدل آفلاین آماده است"
-            loadError != null -> "خطا در بارگذاری: $loadError"
-            else -> "مدل موجود است — آماده بارگذاری"
+            found != null && modelHandle != null -> "مدل آفلاین آماده است\n${found.absolutePath}"
+            found != null -> "مدل پیدا شد — آماده بارگذاری\n${found.name}"
+            loadError != null -> "خطا: $loadError"
+            else -> "مدل پیدا نشد. فایل را در Download بگذار:\n$MODEL_FILE_NAME"
         }
     }
 
     suspend fun ensureLoaded(): Boolean = withContext(Dispatchers.IO) {
         mutex.withLock {
             if (modelHandle != null) return@withContext true
-            val f = modelFile()
-            if (!f.exists() || f.length() < 50_000_000L) {
+            val f = candidateModelFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
+            if (f == null) {
                 loadError = "فایل مدل پیدا نشد"
                 return@withContext false
             }
@@ -62,7 +88,7 @@ class OfflineLlmEngine(private val context: Context) {
                 }
                 modelHandle = handle
                 loadError = null
-                Log.i(TAG, "Model loaded: ${f.length() / 1_000_000}MB")
+                Log.i(TAG, "Model loaded from ${f.absolutePath} (${f.length() / 1_000_000}MB)")
                 true
             } catch (e: Exception) {
                 loadError = e.message ?: e.javaClass.simpleName
@@ -78,8 +104,8 @@ class OfflineLlmEngine(private val context: Context) {
     ): String = withContext(Dispatchers.IO) {
         if (!ensureLoaded()) {
             return@withContext "مدل آفلاین آماده نیست.\n" +
-                "لینک دانلود:\n$MODEL_DOWNLOAD_URL\n\n" +
-                "فایل را با این نام ذخیره کن:\n${modelFile().absolutePath}"
+                "فایل را در پوشه Download گوشی بگذار با این نام:\n$MODEL_FILE_NAME\n\n" +
+                "لینک:\n$MODEL_DOWNLOAD_URL"
         }
         val handle = modelHandle ?: return@withContext "مدل بارگذاری نشد."
 
@@ -148,7 +174,6 @@ class OfflineLlmEngine(private val context: Context) {
         const val MODELS_DIR = "models"
         const val MODEL_FILE_NAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
-        /** ~1.12 GB — دانلود مستقیم */
         const val MODEL_DOWNLOAD_URL =
             "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
