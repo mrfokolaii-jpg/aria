@@ -51,8 +51,6 @@ class AriaOverlayService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    // Do not auto-hide quickly — user reported widget disappearing
-    private val inactivityRunnable = Runnable { /* keep visible */ }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -61,7 +59,7 @@ class AriaOverlayService : Service() {
         chatStore = ChatHistoryStore(this)
         voiceEngine = AriaVoiceEngine(this).also { it.init() }
         initBridge()
-        startForeground(NOTIFICATION_ID, buildNotification())
+        startForeground(NOTIFICATION_ID, buildNotification("ویجت صوتی فعال"))
         initSpeech()
         initFloatingWidget()
     }
@@ -69,7 +67,6 @@ class AriaOverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_SHOW -> showWidget()
-            ACTION_HIDE -> { /* ignore hide from timer */ }
         }
         if (floatButton == null || isHidden) {
             initFloatingWidget()
@@ -105,7 +102,7 @@ class AriaOverlayService : Service() {
         agentBridge = AgentBridge(this, key, endpoint, model)
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(text: String): Notification {
         val channelId = "aria_overlay"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val ch = NotificationChannel(channelId, "ARIA ویجت", NotificationManager.IMPORTANCE_LOW)
@@ -123,12 +120,22 @@ class AriaOverlayService : Service() {
         )
         return NotificationCompat.Builder(this, channelId)
             .setContentTitle("ARIA")
-            .setContentText("ویجت صوتی فعال — ضربه برای نمایش")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(openApp)
             .addAction(0, "نمایش ویجت", showPi)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .build()
+    }
+
+    private fun updateStatus(text: String) {
+        handler.post {
+            try {
+                val nm = getSystemService(NotificationManager::class.java)
+                nm.notify(NOTIFICATION_ID, buildNotification(text))
+            } catch (_: Exception) {}
+        }
     }
 
     private fun initSpeech() {
@@ -137,17 +144,20 @@ class AriaOverlayService : Service() {
             setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
                     updateButton("بگو...", 0xFFFFC107.toInt())
+                    updateStatus("در حال گوش دادن...")
                 }
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() {
                     updateButton("صبر کن...", 0xFF2196F3.toInt())
+                    updateStatus("در حال پردازش...")
                 }
                 override fun onError(error: Int) {
                     isListening = false
                     isProcessing = false
                     updateButton("ARIA", 0xFF00C853.toInt())
+                    updateStatus("ویجت صوتی فعال")
                     val msg = when (error) {
                         SpeechRecognizer.ERROR_NO_MATCH -> "چیزی نشنیدم"
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "زمان تمام شد"
@@ -164,6 +174,7 @@ class AriaOverlayService : Service() {
                     if (text.isNullOrBlank()) {
                         isProcessing = false
                         updateButton("ARIA", 0xFF00C853.toInt())
+                        updateStatus("ویجت صوتی فعال")
                         speak("چیزی نشنیدم")
                         return
                     }
@@ -183,7 +194,6 @@ class AriaOverlayService : Service() {
                 "مجوز «نمایش روی برنامه‌ها» را بدهید تا ویجت دیده شود",
                 Toast.LENGTH_LONG
             ).show()
-            Log.w(TAG, "SYSTEM_ALERT_WINDOW not granted")
             return
         }
 
@@ -191,7 +201,6 @@ class AriaOverlayService : Service() {
             windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         }
 
-        // Remove old view if any
         try { floatButton?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
 
         val layoutFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -289,8 +298,7 @@ class AriaOverlayService : Service() {
                 overlayParams?.let { windowManager?.addView(floatButton, it) }
                 isHidden = false
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "show failed: ${e.message}")
+        } catch (_: Exception) {
             initFloatingWidget()
         }
     }
@@ -311,6 +319,7 @@ class AriaOverlayService : Service() {
         isListening = true
         isProcessing = true
         updateButton("بگو...", 0xFFFFC107.toInt())
+        updateStatus("در حال گوش دادن...")
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(
@@ -326,6 +335,7 @@ class AriaOverlayService : Service() {
             isListening = false
             isProcessing = false
             updateButton("ARIA", 0xFF00C853.toInt())
+            updateStatus("ویجت صوتی فعال")
             Log.e(TAG, "startListening", e)
         }
     }
@@ -333,6 +343,7 @@ class AriaOverlayService : Service() {
     private fun processUserInput(text: String) {
         isProcessing = true
         updateButton("...", 0xFF2196F3.toInt())
+        updateStatus("در حال فکر کردن...")
         chatStore?.append("user", text, "voice")
         scope.launch {
             try {
@@ -341,10 +352,14 @@ class AriaOverlayService : Service() {
                 val reply = response?.text ?: "پاسخی دریافت نشد"
                 chatStore?.append("assistant", reply, "voice")
                 updateButton("ARIA", 0xFF00C853.toInt())
-                speak(reply)
+                updateStatus("در حال پخش پاسخ...")
+                speak(reply) {
+                    updateStatus("ویجت صوتی فعال")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "process", e)
                 updateButton("ARIA", 0xFF00C853.toInt())
+                updateStatus("ویجت صوتی فعال")
                 speak("خطا در پردازش")
             } finally {
                 isProcessing = false
@@ -352,8 +367,8 @@ class AriaOverlayService : Service() {
         }
     }
 
-    private fun speak(msg: String) {
-        voiceEngine?.speak(msg)
+    private fun speak(msg: String, onDone: (() -> Unit)? = null) {
+        voiceEngine?.speak(msg, onDone)
     }
 
     override fun onDestroy() {
