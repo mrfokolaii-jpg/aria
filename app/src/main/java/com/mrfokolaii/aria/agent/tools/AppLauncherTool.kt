@@ -10,7 +10,7 @@ import org.json.JSONObject
 
 class AppLauncherTool(private val context: Context) : AgentTool {
     override val name = "app_launcher"
-    override val description = "Launch installed apps by Persian or English name"
+    override val description = "Launch installed apps by name"
     override val category = ToolCategory.SYSTEM
 
     override suspend fun execute(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
@@ -33,10 +33,10 @@ class AppLauncherTool(private val context: Context) : AgentTool {
                         "package" to ri.activityInfo.packageName
                     )
                 }
-                .sortedBy { (it["name"] as String).lowercase() }
-            ToolResult(true, apps, metadata = mapOf("count" to apps.size))
+                .sortedBy { it["name"]?.toString()?.lowercase() }
+            ToolResult(true, mapOf("apps" to apps, "message" to "${apps.size} برنامه پیدا شد"))
         } catch (e: Exception) {
-            ToolResult(false, null, "Failed to list apps: ${e.message}")
+            ToolResult(false, null, e.message)
         }
     }
 
@@ -58,18 +58,17 @@ class AppLauncherTool(private val context: Context) : AgentTool {
                 return ToolResult(false, null, "برنامه «$appName» روی گوشی پیدا نشد")
             }
 
-            val intent = pm.getLaunchIntentForPackage(target)
-                ?: return ToolResult(false, null, "نمی‌توان «$appName» را باز کرد")
+            val launch = pm.getLaunchIntentForPackage(target)
+                ?: return ToolResult(false, null, "نتوانستم «$appName» را باز کنم")
 
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(intent)
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(launch)
             ToolResult(
                 true,
                 mapOf(
                     "status" to "launched",
                     "package" to target,
-                    "app" to (appName ?: target),
-                    "message" to "برنامه باز شد"
+                    "message" to "برنامه باز شد: $appName"
                 )
             )
         } catch (e: Exception) {
@@ -82,21 +81,23 @@ class AppLauncherTool(private val context: Context) : AgentTool {
         val key = name.lowercase().replace(" ", "").replace("‌", "")
         val candidates = when {
             key.contains("روبیکا") || key.contains("rubika") ->
-                listOf("app.rubika", "ir.mservices.market", "com.rubika")
+                listOf("app.rbmain.a1", "com.rubika")
             key.contains("بله") || key.contains("bale") ->
-                listOf("com.sabaidea.bale", "ir.nasim")
+                listOf("ir.nasim")
             key.contains("ایتا") || key.contains("eitaa") || key.contains("eita") ->
-                listOf("ir.eitaa.messenger", "org.telegram.plus")
+                listOf("ir.eitaa.messenger")
             key.contains("تلگرام") || key.contains("telegram") ->
                 listOf("org.telegram.messenger", "org.telegram.messenger.web")
             key.contains("واتس") || key.contains("whatsapp") ->
-                listOf("com.whatsapp", "com.whatsapp.w4b")
+                listOf("com.whatsapp")
             key.contains("اینستا") || key.contains("instagram") ->
                 listOf("com.instagram.android")
             key.contains("کروم") || key.contains("chrome") ->
                 listOf("com.android.chrome")
             key.contains("فایرفاکس") || key.contains("firefox") || key.contains("فایر") ->
                 listOf("org.mozilla.firefox")
+            key.contains("مرورگر") || key.contains("browser") || key.contains("براوزر") ->
+                listOf("com.android.chrome", "org.mozilla.firefox", "com.sec.android.app.sbrowser", "com.opera.browser")
             key.contains("vpn") || key.contains("ویپیان") || key.contains("وی‌پی‌ان") || key.contains("وی پی ان") ->
                 findVpnPackage()
             else -> emptyList()
