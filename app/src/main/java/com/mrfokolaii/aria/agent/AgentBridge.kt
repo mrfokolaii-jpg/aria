@@ -60,7 +60,6 @@ class AgentBridge(
             return@withContext if (toolResult.success) {
                 val reply = if (online) {
                     try {
-                        // For simple open/launch, prefer short offline reply (no extra API call)
                         if (toolIntent.toolName in setOf("web_browse", "app_launcher", "phone_call", "sms")) {
                             offlineToolReply(toolIntent.toolName, toolResult)
                         } else {
@@ -92,7 +91,6 @@ class AgentBridge(
     }
 
     private fun isOnlineOnlyTool(name: String): Boolean = when (name) {
-        // web_browse opens system browser and can work without our network fetch
         "web_search", "github_search", "youtube_search",
         "reddit_search", "rss_reader", "instagram_search", "bilibili_search" -> true
         else -> false
@@ -196,10 +194,12 @@ class AgentBridge(
             return ToolIntent("sms", params)
         }
 
-        // --- Open known websites (must run before generic app launch) ---
-        val siteUrl = resolveKnownSite(input)
-        if (siteUrl != null) {
-            return ToolIntent("web_browse", mapOf("action" to "open", "url" to siteUrl))
+        // --- Open known websites only when user asks to open/go ---
+        if (containsAny(lower, "باز", "بیار", "برو", "سایت", "open", "browse")) {
+            val siteUrl = resolveKnownSite(input)
+            if (siteUrl != null) {
+                return ToolIntent("web_browse", mapOf("action" to "open", "url" to siteUrl))
+            }
         }
 
         if (containsAny(lower, "مرورگر", "browser", "براوزر")) {
@@ -267,11 +267,11 @@ class AgentBridge(
             return ToolIntent("accessibility_control", mapOf("action" to "back"))
         }
 
-        if (containsAny(lower, "جستجو", "سرچ", "search", "google")) {
+        if (containsAny(lower, "جستجو", "سرچ", "search")) {
             return ToolIntent("web_search", mapOf("query" to extractQuery(input)), useRouter = true)
         }
 
-        if (containsAny(lower, "سایت", "browse", "http", "باز کن", "بیار", "برو")) {
+        if (containsAny(lower, "سایت", "browse", "http")) {
             val url = extractUrl(input) ?: resolveKnownSite(input)
             if (url != null) {
                 return ToolIntent("web_browse", mapOf("action" to "open", "url" to url))
