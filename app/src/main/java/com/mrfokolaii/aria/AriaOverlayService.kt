@@ -48,9 +48,17 @@ class AriaOverlayService : Service() {
     private var isProcessing = false
     private var isHidden = false
     private var preferEnglishStt = false
+    /** After first command, keep listening for next until idle 30s */
+    private var conversationActive = false
 
     private val handler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val idleTimeout = Runnable {
+        conversationActive = false
+        updateButton("ARIA", 0xFF00C853.toInt())
+        updateStatus("ویجت صوتی فعال")
+        Log.d(TAG, "Conversation idle — deactivated")
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -138,6 +146,20 @@ class AriaOverlayService : Service() {
         }
     }
 
+    private fun armIdleTimer() {
+        handler.removeCallbacks(idleTimeout)
+        handler.postDelayed(idleTimeout, 30_000L)
+    }
+
+    private fun scheduleListenAgain() {
+        if (!conversationActive) return
+        handler.postDelayed({
+            if (conversationActive && !isListening && !isProcessing) {
+                startListening()
+            }
+        }, 600)
+    }
+
     private fun initSpeech() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) return
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
@@ -145,8 +167,11 @@ class AriaOverlayService : Service() {
                 override fun onReadyForSpeech(params: Bundle?) {
                     updateButton("بگو...", 0xFFFFC107.toInt())
                     updateStatus("در حال گوش دادن...")
+                    armIdleTimer()
                 }
-                override fun onBeginningOfSpeech() {}
+                override fun onBeginningOfSpeech() {
+                    armIdleTimer()
+                }
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() {
@@ -156,14 +181,26 @@ class AriaOverlayService : Service() {
                 override fun onError(error: Int) {
                     isListening = false
                     isProcessing = false
+                    // In conversation mode, timeout/no-match → listen again until 30s idle
+                    if (conversationActive &&
+                        (error == SpeechRecognizer.ERROR_NO_MATCH ||
+                            error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+                            error == SpeechRecognizer.ERROR_CLIENT)
+                    ) {
+                        updateButton("آماده", 0xFFFF9800.toInt())
+                        updateStatus("منتظر دستور بعدی (۳۰ ثانیه)")
+                        scheduleListenAgain()
+                        return
+                    }
+                    conversationActive = false
                     updateButton("ARIA", 0xFF00C853.toInt())
                     updateStatus("ویجت صوتی فعال")
                     val msg = when (error) {
                         SpeechRecognizer.ERROR_NO_MATCH -> "چیزی نشنیدم"
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "زمان تمام شد"
-                        else -> "خطای تشخیص صدا"
+                        else -> null
                     }
-                    speak(msg)
+                    if (msg != null) speak(msg)
                 }
                 override fun onResults(results: Bundle?) {
                     isListening = false
@@ -173,9 +210,12 @@ class AriaOverlayService : Service() {
                         ?.firstOrNull()?.trim()
                     if (text.isNullOrBlank()) {
                         isProcessing = false
-                        updateButton("ARIA", 0xFF00C853.toInt())
-                        updateStatus("ویجت صوتی فعال")
-                        speak("چیزی نشنیدم")
+                        if (conversationActive) {
+                            scheduleListenAgain()
+                        } else {
+                            updateButton("ARIA", 0xFF00C853.toInt())
+                            updateStatus("ویجت صوتی فعال")
+                        }
                         return
                     }
                     Log.d(TAG, "Recognized: $text")
@@ -238,6 +278,8 @@ class AriaOverlayService : Service() {
                     return@setOnClickListener
                 }
                 if (isListening || isProcessing) return@setOnClickListener
+                conversationActive = true
+                armIdleTimer()
                 startListening()
             }
 
@@ -342,6 +384,8 @@ class AriaOverlayService : Service() {
 
     private fun processUserInput(text: String) {
         isProcessing = true
+        conversationActive = true
+        armIdleTimer()
         updateButton("...", 0xFF2196F3.toInt())
         updateStatus("در حال فکر کردن...")
         chatStore?.append("user", text, "voice")
@@ -354,13 +398,18 @@ class AriaOverlayService : Service() {
                 updateButton("ARIA", 0xFF00C853.toInt())
                 updateStatus("در حال پخش پاسخ...")
                 speak(reply) {
-                    updateStatus("ویجت صوتی فعال")
+                    armIdleTimer()
+                    updateStatus("منتظر دستور بعدی (۳۰ ثانیه)")
+                    updateButton("آماده", 0xFFFF9800.toInt())
+                    scheduleListenAgain()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "process", e)
                 updateButton("ARIA", 0xFF00C853.toInt())
                 updateStatus("ویجت صوتی فعال")
-                speak("خطا در پردازش")
+                speak("خطا در پردازش") {
+                    if (conversationActive) scheduleListenAgain()
+                }
             } finally {
                 isProcessing = false
             }
@@ -373,6 +422,8 @@ class AriaOverlayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        handler.removeCallbacks(idleTimeout)
+        conversationActive = false
         scope.cancel()
         try { floatButton?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
         try { speechRecognizer?.destroy() } catch (_: Exception) {}
