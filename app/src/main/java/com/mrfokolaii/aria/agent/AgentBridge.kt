@@ -7,7 +7,6 @@ import com.mrfokolaii.aria.util.NetworkUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Response from AgentBridge processWithAgentTools */
 data class AgentResponse(
     val text: String,
     val toolUsed: String? = null,
@@ -15,19 +14,18 @@ data class AgentResponse(
 )
 
 /**
- * Bridge between ARIA service and Agent Tools.
- * Online: AI + web tools. Offline: local device tools still work.
+ * Bridge: local tools + offline Qwen (no cloud API).
  */
 class AgentBridge(
     private val context: Context,
-    apiKey: String,
-    endpoint: String,
-    model: String
+    @Suppress("UNUSED_PARAMETER") apiKey: String = "",
+    @Suppress("UNUSED_PARAMETER") endpoint: String = "",
+    @Suppress("UNUSED_PARAMETER") model: String = ""
 ) {
 
     private val toolManager = AgentToolManager(context)
-    private val unoRouter = UnoRouterProvider(apiKey, endpoint, model)
-    private var lastUsedModel: String? = null
+    private val offlineLlm = OfflineLlmEngine(context)
+    private var lastUsedModel: String? = "qwen2.5-1.5b-instruct-q4"
 
     fun setAccessibilityService(service: android.accessibilityservice.AccessibilityService?) {
         toolManager.setAccessibilityService(service)
@@ -46,8 +44,7 @@ class AgentBridge(
 
             if (!online && isOnlineOnlyTool(toolIntent.toolName)) {
                 return@withContext AgentResponse(
-                    text = "الان اینترنت قطع است. این کار (جستجو/وب) بدون اینترنت ممکن نیست. " +
-                            "ولی می‌تونم برنامه باز کنم، تماس بگیرم، پیامک بفرستم یا کنترل صفحه انجام بدم."
+                    text = "این کار به اینترنت نیاز دارد. بدون نت می‌تونم برنامه باز کنم، تماس بگیرم، پیامک بفرستم."
                 )
             }
 
@@ -58,36 +55,25 @@ class AgentBridge(
             }
 
             return@withContext if (toolResult.success) {
-                val reply = if (online) {
+                val reply = if (toolIntent.toolName in setOf("web_browse", "app_launcher", "phone_call", "sms")) {
+                    offlineToolReply(toolIntent.toolName, toolResult)
+                } else {
                     try {
-                        if (toolIntent.toolName in setOf("web_browse", "app_launcher", "phone_call", "sms")) {
-                            offlineToolReply(toolIntent.toolName, toolResult)
-                        } else {
-                            generateResponseWithToolData(userInput, toolResult)
-                        }
+                        generateResponseWithToolData(userInput, toolResult)
                     } catch (_: Exception) {
                         offlineToolReply(toolIntent.toolName, toolResult)
                     }
-                } else {
-                    offlineToolReply(toolIntent.toolName, toolResult)
                 }
                 AgentResponse(text = reply, toolUsed = toolIntent.toolName, toolResult = toolResult)
             } else {
-                AgentResponse(
-                    text = toolResult.error ?: "انجام نشد. دوباره بگو."
-                )
+                AgentResponse(text = toolResult.error ?: "انجام نشد. دوباره بگو.")
             }
         }
 
-        if (!online) {
-            return@withContext AgentResponse(
-                text = "متوجه نشدم. می‌تونی بگی مثلاً: روبیکا رو باز کن، به علی زنگ بزن، پیامک بفرست، یا کروم رو باز کن."
-            )
-        }
-
-        val chatResponse = unoRouter.chat(userInput, conversationHistory)
-        lastUsedModel = chatResponse.usedModel
-        AgentResponse(text = chatResponse.text)
+        // Chat: always offline Qwen
+        val text = offlineLlm.chat(userInput, conversationHistory)
+        lastUsedModel = "qwen2.5-1.5b-instruct-q4"
+        AgentResponse(text = text)
     }
 
     private fun isOnlineOnlyTool(name: String): Boolean = when (name) {
@@ -120,15 +106,6 @@ class AgentBridge(
             "web_browse" -> {
                 val map = data as? Map<*, *>
                 map?.get("message")?.toString() ?: "سایت در مرورگر باز شد."
-            }
-            "accessibility_control" -> {
-                when (data) {
-                    is Map<*, *> -> data["text"]?.toString()?.take(200)
-                        ?: data["message"]?.toString()
-                        ?: "دستور صفحه انجام شد."
-                    is String -> data.take(200)
-                    else -> "دستور صفحه انجام شد."
-                }
             }
             else -> {
                 when (data) {
@@ -194,7 +171,6 @@ class AgentBridge(
             return ToolIntent("sms", params)
         }
 
-        // --- Open known websites only when user asks to open/go ---
         if (containsAny(lower, "باز", "بیار", "برو", "سایت", "open", "browse")) {
             val siteUrl = resolveKnownSite(input)
             if (siteUrl != null) {
@@ -289,8 +265,6 @@ class AgentBridge(
             lower.contains("google") || lower.contains("گوگل") -> "https://www.google.com"
             lower.contains("youtube") || lower.contains("یوتیوب") || lower.contains("یوتوب") -> "https://www.youtube.com"
             lower.contains("openai") || lower.contains("chatgpt") -> "https://chatgpt.com"
-            lower.contains("groq") -> "https://console.groq.com"
-            lower.contains("openrouter") -> "https://openrouter.ai"
             else -> null
         }
     }
@@ -318,13 +292,11 @@ class AgentBridge(
     private suspend fun generateResponseWithToolData(userInput: String, toolResult: ToolResult): String {
         val prompt = buildString {
             append("کاربر پرسیده: $userInput\n\n")
-            append("من این اطلاعات رو براش پیدا کردم:\n")
+            append("نتیجه ابزار:\n")
             append(formatToolResult(toolResult))
-            append("\n\nلطفاً یک پاسخ کوتاه و دوستانه به فارسی بده که این اطلاعات رو خلاصه کنه.")
+            append("\n\nپاسخ کوتاه فارسی بده.")
         }
-        val chatResponse = unoRouter.chat(prompt, emptyList())
-        lastUsedModel = chatResponse.usedModel
-        return chatResponse.text
+        return offlineLlm.chat(prompt, emptyList())
     }
 
     private fun formatToolResult(result: ToolResult): String {
@@ -337,11 +309,10 @@ class AgentBridge(
 
     fun getLastUsedModel(): String? = lastUsedModel
 
-    suspend fun getAvailableModels(): List<String> =
-        unoRouter.fetchAvailableModels().map { it.id }
+    suspend fun getAvailableModels(): List<String> = listOf("qwen2.5-1.5b-instruct-q4_k_m")
 
     suspend fun runHealthCheck(): String =
-        toolManager.runDoctorCheck().toReadableString()
+        toolManager.runDoctorCheck().toReadableString() + "\n" + offlineLlm.modelStatusText()
 
     fun listTools(): String {
         val tools = toolManager.listAllTools()
