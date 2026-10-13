@@ -93,23 +93,40 @@ class OfflineLlmEngine(private val context: Context) {
             if (taskFile != null) {
                 try {
                     Log.i(TAG, "Loading MediaPipe model ${taskFile.absolutePath}")
-                    val builder = LlmInference.LlmInferenceOptions.builder()
+                    val options = LlmInference.LlmInferenceOptions.builder()
                         .setModelPath(taskFile.absolutePath)
                         .setMaxTokens(512)
                         .setMaxTopK(40)
-                        .setTemperature(0.7f)
-                    preferGpuBackend(builder)
-                    val engine = LlmInference.createFromOptions(context, builder.build())
+                        .setPreferredBackend(LlmInference.Backend.GPU)
+                        .build()
+                    val engine = LlmInference.createFromOptions(context, options)
                     sharedMediaPipe = engine
                     activeBackend = Backend.MEDIAPIPE_GPU
                     lastLoadError = null
                     loadedPath = taskFile.absolutePath
-                    Log.i(TAG, "MediaPipe loaded (GPU preferred)")
+                    Log.i(TAG, "MediaPipe loaded with preferredBackend=GPU")
                     return@withContext true
                 } catch (e: Throwable) {
-                    Log.e(TAG, "MediaPipe load failed, will try GGUF", e)
-                    lastLoadError = "MediaPipe: ${e.javaClass.simpleName}: ${e.message}"
-                    sharedMediaPipe = null
+                    Log.e(TAG, "MediaPipe GPU load failed, trying DEFAULT", e)
+                    try {
+                        val options = LlmInference.LlmInferenceOptions.builder()
+                            .setModelPath(taskFile.absolutePath)
+                            .setMaxTokens(512)
+                            .setMaxTopK(40)
+                            .setPreferredBackend(LlmInference.Backend.DEFAULT)
+                            .build()
+                        val engine = LlmInference.createFromOptions(context, options)
+                        sharedMediaPipe = engine
+                        activeBackend = Backend.MEDIAPIPE_CPU
+                        lastLoadError = null
+                        loadedPath = taskFile.absolutePath
+                        Log.i(TAG, "MediaPipe loaded with DEFAULT backend")
+                        return@withContext true
+                    } catch (e2: Throwable) {
+                        Log.e(TAG, "MediaPipe load failed, will try GGUF", e2)
+                        lastLoadError = "MediaPipe: ${e2.javaClass.simpleName}: ${e2.message}"
+                        sharedMediaPipe = null
+                    }
                 }
             }
 
@@ -191,27 +208,6 @@ class OfflineLlmEngine(private val context: Context) {
     }
 
     fun release() {}
-
-    private fun preferGpuBackend(builder: LlmInference.LlmInferenceOptions.Builder) {
-        try {
-            val backendClass = Class.forName(
-                "com.google.mediapipe.tasks.genai.llminference.LlmInference\$Backend"
-            )
-            @Suppress("UNCHECKED_CAST")
-            val gpu = java.lang.Enum.valueOf(backendClass as Class<out Enum<*>>, "GPU")
-            val method = builder.javaClass.methods.firstOrNull { m ->
-                m.name == "setPreferredBackend" && m.parameterTypes.size == 1
-            }
-            if (method != null) {
-                method.invoke(builder, gpu)
-                Log.i(TAG, "setPreferredBackend(GPU) applied")
-            } else {
-                Log.i(TAG, "setPreferredBackend not in this MediaPipe version")
-            }
-        } catch (e: Throwable) {
-            Log.i(TAG, "GPU preference optional: ${e.message}")
-        }
-    }
 
     enum class Backend { NONE, MEDIAPIPE_GPU, MEDIAPIPE_CPU, LLAMA_CPU }
 
