@@ -39,7 +39,6 @@ class AgentBridge(
         val online = NetworkUtils.isOnline(context)
         val lower = userInput.lowercase().replace("‌", "")
 
-        // Explicit knowledge status
         if (containsAny(lower, "لیست دانش", "فایل دانش", "دانش من", "بروزرسانی دانش")) {
             return@withContext AgentResponse(text = knowledgeStore.statusText())
         }
@@ -69,11 +68,11 @@ class AgentBridge(
                         val raw = offlineToolReply("web_search", toolResult)
                         try {
                             offlineLlm.chat(
-                                "نتایج جستجوی اینترنت:\n$raw\n\nسؤال کاربر: $userInput\nپاسخ کوتاه فارسی بده.",
+                                "نتایج جستجو:\n$raw\n\nسؤال: $userInput\nخیلی کوتاه فارسی جواب بده.",
                                 emptyList()
                             )
                         } catch (_: Exception) {
-                            raw.take(1500)
+                            raw.take(1200)
                         }
                     }
                     else -> try {
@@ -88,10 +87,9 @@ class AgentBridge(
             }
         }
 
-        // Chat: offline Qwen + local knowledge
         val knowledge = try { knowledgeStore.retrieveRelevant(userInput) } catch (_: Exception) { "" }
         val prompt = if (knowledge.isNotBlank()) {
-            "از دانش محلی زیر استفاده کن اگر مرتبط است.\n\nدانش محلی:\n$knowledge\n\nسؤال کاربر: $userInput"
+            "دانش مرتبط:\n$knowledge\n\nسؤال: $userInput\nکوتاه جواب بده."
         } else userInput
         val text = offlineLlm.chat(prompt, conversationHistory)
         lastUsedModel = "qwen2.5-1.5b-instruct-q4"
@@ -184,19 +182,31 @@ class AgentBridge(
             }
         }
 
-        if (containsAny(lower, "پیامک", "اس ام اس", "اس‌ام‌اس", "sms", "message")) {
+        if (containsAny(
+                lower,
+                "پیامک", "اس ام اس", "اس‌ام‌اس", "اساماس", "sms", "message",
+                "پیام رسان", "پیام‌رسان", "پیامرسان", "messages", "messaging"
+            )
+        ) {
             val number = extractPhoneNumber(input)
-            val nameMatch = Regex("(?:پیامک|اس\\s*ام\\s*اس|sms)\\s*(?:به|برای)?\\s*([^\\s]+)", RegexOption.IGNORE_CASE).find(input)
+            val nameMatch = Regex(
+                "(?:پیامک|اس\\s*ام\\s*اس|پیام\\s*رسان|sms)\\s*(?:به|برای)?\\s*([^\\s]+)",
+                RegexOption.IGNORE_CASE
+            ).find(input)
             val contact = nameMatch?.groupValues?.getOrNull(1)?.takeIf {
-                it.length > 1 && extractPhoneNumber(it) == null &&
-                    !it.contains("بفرست") && !it.equals("باز", true)
+                val c = it.trim()
+                c.length > 1 && extractPhoneNumber(c) == null &&
+                    !containsAny(c, "بفرست", "باز", "کن", "گوشی", "گوشیو", "برنامه", "اپ")
             }
-            val body = input
-                .replace(Regex("(پیامک|اس\\s*ام\\s*اس|sms|بفرست|به|برای)", RegexOption.IGNORE_CASE), " ")
-                .let { if (contact != null) it.replace(contact, " ") else it }
-                .replace(Regex("\\d{8,}"), " ")
-                .trim()
-                .takeIf { it.length > 1 }
+            val wantsBody = containsAny(lower, "بفرست", "بگو", "بنویس", "با متن")
+            val body = if (wantsBody) {
+                input
+                    .replace(Regex("(پیامک|اس\\s*ام\\s*اس|پیام\\s*رسان|sms|بفرست|به|برای|باز\\s*کن)", RegexOption.IGNORE_CASE), " ")
+                    .let { if (contact != null) it.replace(contact, " ") else it }
+                    .replace(Regex("\\d{8,}"), " ")
+                    .trim()
+                    .takeIf { it.length > 1 }
+            } else null
             val params = mutableMapOf<String, Any>()
             if (number != null) params["phone_number"] = number
             if (contact != null) params["contact_name"] = contact
@@ -316,8 +326,12 @@ class AgentBridge(
         Regex("0?9\\d{9}|\\+?\\d{10,13}").find(input.replace(" ", ""))?.value
 
     private fun extractAppName(input: String): String? =
-        input.replace(Regex("(باز کن|اجرا کن|برنامه|اپ|open|launch|app)", RegexOption.IGNORE_CASE), "")
-            .trim().takeIf { it.isNotEmpty() }
+        input
+            .replace(Regex("(باز\\s*کن|اجرا\\s*کن|بازکن|برنامه|اپلیکیشن|اپ|لطفا|open|launch|app)", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .trimEnd('و', ' ')
+            .takeIf { it.length >= 2 }
 
     private fun extractTargetText(input: String): String? =
         input.replace(Regex("(کلیک|بزن|فشار بده|تایپ کن|بنویس|وارد کن|click|tap|type|enter|روی|on)", RegexOption.IGNORE_CASE), "")
@@ -328,10 +342,9 @@ class AgentBridge(
 
     private suspend fun generateResponseWithToolData(userInput: String, toolResult: ToolResult): String {
         val prompt = buildString {
-            append("کاربر پرسیده: $userInput\n\n")
-            append("نتیجه ابزار:\n")
+            append("کاربر: $userInput\nنتیجه ابزار:\n")
             append(formatToolResult(toolResult))
-            append("\n\nپاسخ کوتاه فارسی بده.")
+            append("\nکوتاه فارسی بگو.")
         }
         return offlineLlm.chat(prompt, emptyList())
     }
