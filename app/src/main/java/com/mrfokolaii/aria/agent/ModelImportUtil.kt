@@ -8,27 +8,25 @@ import java.io.FileOutputStream
 
 object ModelImportUtil {
 
-    fun appModelFile(context: Context): File {
+    fun appModelFile(context: Context, fileName: String = OfflineLlmEngine.MODEL_FILE_NAME): File {
         val dir = context.getExternalFilesDir(OfflineLlmEngine.MODELS_DIR)
             ?: File(context.filesDir, OfflineLlmEngine.MODELS_DIR).also { it.mkdirs() }
         if (!dir.exists()) dir.mkdirs()
-        return File(dir, OfflineLlmEngine.MODEL_FILE_NAME)
+        return File(dir, fileName)
     }
 
-    fun status(context: Context): String {
-        val engine = OfflineLlmEngine(context)
-        val found = engine.candidateModelFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
-        return if (found != null) {
-            "مدل آماده: ${found.name} (${found.length() / 1_000_000} MB)\n${found.absolutePath}"
-        } else {
-            "مدل پیدا نشد.\nاز دکمه «انتخاب فایل مدل» همان فایل داخل Download را انتخاب کن تا کپی شود."
-        }
-    }
+    fun status(context: Context): String = OfflineLlmEngine(context).modelStatusText()
 
-    /** Copy content URI (from file picker) into app-private models folder. */
+    /** Copy content URI into app models folder (.task for GPU or .gguf for CPU). */
     fun importFromUri(context: Context, uri: Uri): Result<File> {
         return try {
-            val dest = appModelFile(context)
+            val segment = (uri.lastPathSegment ?: "model").lowercase()
+            val cleanName = when {
+                segment.endsWith(".gguf") || segment.contains("gguf") ->
+                    OfflineLlmEngine.GGUF_FILE_NAME
+                else -> OfflineLlmEngine.TASK_FILE_NAME
+            }
+            val dest = appModelFile(context, cleanName)
             val tmp = File(dest.absolutePath + ".part")
             context.contentResolver.openInputStream(uri).use { input ->
                 if (input == null) return Result.failure(Exception("نتوانستم فایل را باز کنم"))
@@ -44,13 +42,16 @@ object ModelImportUtil {
             }
             if (tmp.length() < 50_000_000L) {
                 tmp.delete()
-                return Result.failure(Exception("فایل خیلی کوچک است (${tmp.length()} بایت) — فایل کامل GGUF را انتخاب کن"))
+                return Result.failure(
+                    Exception("فایل خیلی کوچک است (${tmp.length()} بایت) — مدل کامل را انتخاب کن")
+                )
             }
             if (dest.exists()) dest.delete()
             if (!tmp.renameTo(dest)) {
                 tmp.copyTo(dest, overwrite = true)
                 tmp.delete()
             }
+            OfflineLlmEngine.unloadAll()
             Log.i(TAG, "Imported model to ${dest.absolutePath} (${dest.length()})")
             Result.success(dest)
         } catch (e: Exception) {
