@@ -5,6 +5,7 @@ import android.os.Environment
 import android.util.Log
 import dev.ffmpegkit.llama.Llama
 import dev.ffmpegkit.llama.LlamaConfig
+import dev.ffmpegkit.llama.LlamaModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -12,7 +13,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * On-device Qwen2.5-1.5B GGUF via llama-android (suspend API — not reflection).
+ * On-device Qwen2.5-1.5B GGUF via llama-android suspend API.
  */
 class OfflineLlmEngine(private val context: Context) {
 
@@ -65,10 +66,7 @@ class OfflineLlmEngine(private val context: Context) {
                 val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
                 Log.i(TAG, "Loading ${f.absolutePath} (${f.length() / 1_000_000}MB) threads=$threads")
                 val config = LlamaConfig(contextSize = 2048, threads = threads)
-                val model = Llama.loadModel(
-                    modelPath = f.absolutePath,
-                    config = config
-                )
+                val model = Llama.loadModel(modelPath = f.absolutePath, config = config)
                 sharedModel = model
                 lastLoadError = null
                 loadedPath = f.absolutePath
@@ -92,7 +90,7 @@ class OfflineLlmEngine(private val context: Context) {
                 lastLoadError?.let { appendLine("علت: $it") }
                 appendLine("مسیر فایل:")
                 appendLine(modelFile().absolutePath)
-                appendLine("اگر فایل هست: یک‌بار اپ را کامل ببند و باز کن.")
+                appendLine("اپ را کامل ببند و دوباره باز کن، بعد دوباره بپرس.")
             }
         }
         val model = sharedModel ?: return@withContext "مدل null است."
@@ -108,7 +106,7 @@ class OfflineLlmEngine(private val context: Context) {
         try {
             loadMutex.withLock {
                 val result = Llama.complete(
-                    model,
+                    model = model,
                     prompt = prompt,
                     systemPrompt = SYSTEM_PROMPT,
                     maxTokens = 256
@@ -121,7 +119,7 @@ class OfflineLlmEngine(private val context: Context) {
         }
     }
 
-    fun release() { /* keep process-wide model */ }
+    fun release() { /* process-wide model kept */ }
 
     companion object {
         private const val TAG = "OfflineLlmEngine"
@@ -131,7 +129,7 @@ class OfflineLlmEngine(private val context: Context) {
             "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
         private val loadMutex = Mutex()
-        @Volatile var sharedModel: Any? = null
+        @Volatile var sharedModel: LlamaModel? = null
             private set
         @Volatile var lastLoadError: String? = null
             private set
