@@ -18,12 +18,9 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
-import com.mrfokolaii.aria.agent.ApiConnectionTester
 import com.mrfokolaii.aria.agent.ModelImportUtil
-import com.mrfokolaii.aria.agent.UnoRouterProvider
 import com.mrfokolaii.aria.memory.LocalKnowledgeStore
 import com.mrfokolaii.aria.memory.PersistentMemory
-import com.mrfokolaii.aria.voice.AriaVoiceEngine
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
@@ -41,22 +38,30 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri == null) {
-            Toast.makeText(this, "فایلی انتخاب نشد", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this@MainActivity, "فایلی انتخاب نشد", Toast.LENGTH_SHORT).show()
             return@registerForActivityResult
         }
-        Toast.makeText(this, "در حال کپی مدل از حافظه... صبر کن", Toast.LENGTH_LONG).show()
+        Toast.makeText(this@MainActivity, "در حال کپی مدل از حافظه... صبر کن", Toast.LENGTH_LONG).show()
         Thread {
-            val result = ModelImportUtil.importFromUri(this, uri)
+            val result = ModelImportUtil.importFromUri(this@MainActivity, uri)
             runOnUiThread {
                 if (result.isSuccess) {
                     val f = result.getOrNull()
-                    Toast.makeText(this, "مدل از حافظه نصب شد (${(f?.length() ?: 0) / 1_000_000} MB)", Toast.LENGTH_LONG).show()
+                    Toast.makeText(
+                        this@MainActivity,
+                        "مدل از حافظه نصب شد (${(f?.length() ?: 0) / 1_000_000} MB)",
+                        Toast.LENGTH_LONG
+                    ).show()
                     if (::modelStatusView.isInitialized) {
-                        modelStatusView.text = ModelImportUtil.status(this)
+                        modelStatusView.text = ModelImportUtil.status(this@MainActivity)
                         modelStatusView.setTextColor(Color.parseColor("#00E676"))
                     }
                 } else {
-                    Toast.makeText(this, "خطا: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(
+                        this@MainActivity,
+                        "خطا: ${result.exceptionOrNull()?.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             }
         }.start()
@@ -194,7 +199,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             setOnClickListener {
                 knowledgeStatusView.text = LocalKnowledgeStore(this@MainActivity).statusText()
-                Toast.makeText(this, "لیست دانش بروز شد", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "لیست دانش بروز شد", Toast.LENGTH_SHORT).show()
             }
         })
         root.addView(TextView(this).apply {
@@ -245,7 +250,7 @@ class MainActivity : AppCompatActivity() {
                 saveFields()
                 ensureRunPermissions()
                 startService(Intent(this@MainActivity, AriaOverlayService::class.java))
-                Toast.makeText(this, "ویجت فعال شد", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "ویجت فعال شد", Toast.LENGTH_SHORT).show()
             }
         })
 
