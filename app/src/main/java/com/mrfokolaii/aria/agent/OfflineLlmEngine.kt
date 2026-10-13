@@ -12,9 +12,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/**
- * On-device Qwen2.5-1.5B GGUF via llama-android suspend API.
- */
+/** On-device Qwen2.5-1.5B GGUF — tuned for lower latency on phone CPU. */
 class OfflineLlmEngine(private val context: Context) {
 
     fun candidateModelFiles(): List<File> {
@@ -65,7 +63,8 @@ class OfflineLlmEngine(private val context: Context) {
             try {
                 val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
                 Log.i(TAG, "Loading ${f.absolutePath} (${f.length() / 1_000_000}MB) threads=$threads")
-                val config = LlamaConfig(contextSize = 2048, threads = threads)
+                // Smaller context = faster prompt eval on CPU
+                val config = LlamaConfig(contextSize = 1024, threads = threads)
                 val model = Llama.loadModel(modelPath = f.absolutePath, config = config)
                 sharedModel = model
                 lastLoadError = null
@@ -90,17 +89,16 @@ class OfflineLlmEngine(private val context: Context) {
                 lastLoadError?.let { appendLine("علت: $it") }
                 appendLine("مسیر فایل:")
                 appendLine(modelFile().absolutePath)
-                appendLine("اپ را کامل ببند و دوباره باز کن، بعد دوباره بپرس.")
             }
         }
         val model = sharedModel ?: return@withContext "مدل null است."
 
         val prompt = buildString {
-            history.takeLast(6).forEach { (role, content) ->
-                if (role == "user") append("User: ${content.take(400)}\n")
-                else append("Assistant: ${content.take(400)}\n")
+            history.takeLast(3).forEach { (role, content) ->
+                if (role == "user") append("User: ${content.take(200)}\n")
+                else append("Assistant: ${content.take(200)}\n")
             }
-            append("User: ${userMessage.take(800)}\nAssistant:")
+            append("User: ${userMessage.take(500)}\nAssistant:")
         }
 
         try {
@@ -109,7 +107,7 @@ class OfflineLlmEngine(private val context: Context) {
                     model = model,
                     prompt = prompt,
                     systemPrompt = SYSTEM_PROMPT,
-                    maxTokens = 256
+                    maxTokens = 120
                 )
                 result.text.trim().ifBlank { "پاسخی تولید نشد." }
             }
@@ -119,7 +117,7 @@ class OfflineLlmEngine(private val context: Context) {
         }
     }
 
-    fun release() { /* process-wide model kept */ }
+    fun release() {}
 
     companion object {
         private const val TAG = "OfflineLlmEngine"
@@ -136,10 +134,7 @@ class OfflineLlmEngine(private val context: Context) {
         @Volatile var loadedPath: String? = null
             private set
 
-        private val SYSTEM_PROMPT = """
-تو آریا هستی، دستیار هوشمند فارسی روی اندروید.
-پاسخ کوتاه، واضح و دوستانه به فارسی بده.
-اگر دانش محلی داده شد از آن استفاده کن.
-""".trim()
+        private val SYSTEM_PROMPT =
+            "تو آریا هستی. فقط فارسی، خیلی کوتاه و مستقیم جواب بده. سلام اضافه نکن مگر کاربر سلام کند."
     }
 }
