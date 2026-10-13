@@ -17,7 +17,6 @@ class AgentToolManager(private val context: android.content.Context? = null) {
     private val registry = ToolRegistry()
     private val router = ToolRouter(registry)
 
-    // MUST be initialized before registerAllTools() / init block
     private val enhancedAccessibility = EnhancedAccessibilityTool()
 
     init {
@@ -41,6 +40,7 @@ class AgentToolManager(private val context: android.content.Context? = null) {
 
         safeRegister(WebSearchTool(client))
         context?.let { safeRegister(WebBrowseTool(it, client)) }
+        context?.let { safeRegister(FileDownloadTool(it, client)) }
         safeRegister(GitHubTool(client, context))
         safeRegister(YouTubeTool(client))
         safeRegister(RedditTool(client))
@@ -79,7 +79,6 @@ class AgentToolManager(private val context: android.content.Context? = null) {
 
     fun getRouter(): ToolRouter = router
 
-    /** Shape expected by AgentBridge.listTools() */
     fun listAllTools(): List<Map<String, Any>> {
         return registry.getAllTools().map { tool ->
             mapOf(
@@ -112,10 +111,7 @@ class AgentToolManager(private val context: android.content.Context? = null) {
                     recommendations.add("$toolName: Configure API credentials")
                 status.message.contains("timeout", ignoreCase = true) ->
                     recommendations.add("$toolName: Check network connection")
-                status.message.contains("404", ignoreCase = true) ->
-                    recommendations.add("$toolName: Service endpoint may have changed")
-                else ->
-                    recommendations.add("$toolName: ${status.message}")
+                else -> recommendations.add("$toolName: ${status.message}")
             }
         }
         return recommendations
@@ -135,21 +131,10 @@ data class DoctorReport(
 ) {
     fun toReadableString(): String {
         return buildString {
-            appendLine("🔧 ARIA Agent Tools Health Report")
-            appendLine("=".repeat(50))
-            appendLine("Total Tools: $totalTools")
-            appendLine("✅ Healthy: $healthyTools")
-            appendLine("❌ Unhealthy: $unhealthyTools")
-            appendLine()
-            appendLine("Details:")
+            appendLine("ARIA Tools: $healthyTools/$totalTools healthy")
             healthDetails.forEach { (name, status) ->
-                val icon = if (status.isHealthy) "✅" else "❌"
-                appendLine("  $icon $name: ${status.message} (${status.latencyMs}ms)")
-            }
-            if (recommendations.isNotEmpty()) {
-                appendLine()
-                appendLine("Recommendations:")
-                recommendations.forEach { appendLine("  • $it") }
+                val icon = if (status.isHealthy) "OK" else "ERR"
+                appendLine("  $icon $name: ${status.message}")
             }
         }
     }
