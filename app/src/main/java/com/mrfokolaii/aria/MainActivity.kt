@@ -18,10 +18,10 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import com.mrfokolaii.aria.agent.ApiConnectionTester
 import com.mrfokolaii.aria.agent.ModelImportUtil
 import com.mrfokolaii.aria.agent.UnoRouterProvider
+import com.mrfokolaii.aria.memory.LocalKnowledgeStore
 import com.mrfokolaii.aria.memory.PersistentMemory
 import com.mrfokolaii.aria.voice.AriaVoiceEngine
 import java.io.File
@@ -33,18 +33,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var groqKey: EditText
     private lateinit var groqModel: EditText
     private lateinit var groqStatus: TextView
-    private lateinit var openRouterKey: EditText
-    private lateinit var openRouterModel: EditText
-    private lateinit var openRouterStatus: TextView
-    private lateinit var xaiKey: EditText
-    private lateinit var xaiModel: EditText
-    private lateinit var xaiStatus: TextView
-    private lateinit var customUrl: EditText
-    private lateinit var customKey: EditText
-    private lateinit var customModel: EditText
-    private lateinit var customStatus: TextView
     private lateinit var widgetSwitch: Switch
     private lateinit var modelStatusView: TextView
+    private lateinit var knowledgeStatusView: TextView
 
     private val modelPicker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -53,13 +44,13 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "فایلی انتخاب نشد", Toast.LENGTH_SHORT).show()
             return@registerForActivityResult
         }
-        Toast.makeText(this, "در حال کپی مدل... صبر کن (حدود ۱ گیگ)", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "در حال کپی مدل از حافظه... صبر کن", Toast.LENGTH_LONG).show()
         Thread {
             val result = ModelImportUtil.importFromUri(this, uri)
             runOnUiThread {
                 if (result.isSuccess) {
                     val f = result.getOrNull()
-                    Toast.makeText(this, "مدل نصب شد (${(f?.length() ?: 0) / 1_000_000} MB)", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "مدل از حافظه نصب شد (${(f?.length() ?: 0) / 1_000_000} MB)", Toast.LENGTH_LONG).show()
                     if (::modelStatusView.isInitialized) {
                         modelStatusView.text = ModelImportUtil.status(this)
                         modelStatusView.setTextColor(Color.parseColor("#00E676"))
@@ -89,9 +80,6 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            try { perms.add(Manifest.permission.BLUETOOTH_CONNECT) } catch (_: Exception) {}
-        }
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
             perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
             perms.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -114,6 +102,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         createGrokFolder()
+        try { LocalKnowledgeStore(this).ensureFolders() } catch (_: Exception) {}
         getSharedPreferences("aria", MODE_PRIVATE).edit().putBoolean("first_run_done", true).apply()
     }
 
@@ -145,16 +134,15 @@ class MainActivity : AppCompatActivity() {
         })
 
         activeProviderLabel = TextView(this).apply {
-            text = "مغز: آفلاین Qwen (بدون API)"
+            text = "مغز: آفلاین Qwen + دانش محلی + جستجوی اینترنت"
             textSize = 13f
             setTextColor(Color.parseColor("#00E676"))
             setPadding(0, 8, 0, 12)
         }
         root.addView(activeProviderLabel)
 
-        // --- Offline Qwen model ---
         root.addView(TextView(this).apply {
-            text = "مدل آفلاین Qwen"
+            text = "۱) آپلود مدل از حافظه"
             textSize = 16f
             setTextColor(Color.WHITE)
             setPadding(0, 12, 0, 6)
@@ -167,7 +155,7 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(modelStatusView)
         root.addView(Button(this).apply {
-            text = "انتخاب فایل مدل از Download"
+            text = "آپلود مدل از حافظه گوشی"
             setBackgroundColor(Color.parseColor("#1565C0"))
             setTextColor(Color.WHITE)
             setOnClickListener {
@@ -179,7 +167,38 @@ class MainActivity : AppCompatActivity() {
             }
         })
         root.addView(TextView(this).apply {
-            text = "فایل qwen2.5-1.5b-instruct-q4_k_m.gguf را از Download انتخاب کن تا داخل اپ کپی شود (حدود ۱ گیگ؛ یک‌بار)."
+            text = "فایل qwen2.5-1.5b-instruct-q4_k_m.gguf را از حافظه انتخاب کن تا داخل اپ کپی شود."
+            textSize = 11f
+            setTextColor(Color.GRAY)
+            setPadding(0, 4, 0, 12)
+        })
+
+        root.addView(TextView(this).apply {
+            text = "۲) دانش PDF / فایل‌ها"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setPadding(0, 8, 0, 6)
+        })
+        val ks = LocalKnowledgeStore(this)
+        try { ks.ensureFolders() } catch (_: Exception) {}
+        knowledgeStatusView = TextView(this).apply {
+            text = ks.statusText()
+            textSize = 12f
+            setTextColor(Color.parseColor("#B0BEC5"))
+            setPadding(0, 0, 0, 8)
+        }
+        root.addView(knowledgeStatusView)
+        root.addView(Button(this).apply {
+            text = "بروزرسانی لیست دانش"
+            setBackgroundColor(Color.parseColor("#00695C"))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                knowledgeStatusView.text = LocalKnowledgeStore(this@MainActivity).statusText()
+                Toast.makeText(this, "لیست دانش بروز شد", Toast.LENGTH_SHORT).show()
+            }
+        })
+        root.addView(TextView(this).apply {
+            text = "فایل‌های txt/md/pdf را بگذار در:\nDownload/aria pdf\n\nدر چت بگو: «لیست دانش» یا سؤال از محتوای فایل‌ها."
             textSize = 11f
             setTextColor(Color.GRAY)
             setPadding(0, 4, 0, 12)
@@ -237,18 +256,14 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 16, 0, 8)
         })
         offlineTtsStatus = TextView(this).apply {
-            text = try {
-                val eng = AriaVoiceEngine(this@MainActivity)
-                eng.init()
-                "موتور TTS گوشی / Sherpa"
-            } catch (_: Exception) { "TTS" }
+            text = "موتور TTS گوشی / Sherpa"
             textSize = 12f
             setTextColor(Color.parseColor("#80CBC4"))
         }
         root.addView(offlineTtsStatus)
         val ttsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         ttsRow.addView(Button(this).apply {
-            text = "تنظیمات TTS گوشی"
+            text = "تنظیمات TTS"
             setBackgroundColor(Color.parseColor("#37474F"))
             setTextColor(Color.WHITE)
             setOnClickListener {
@@ -256,76 +271,31 @@ class MainActivity : AppCompatActivity() {
                 catch (_: Exception) { startActivity(Intent(Settings.ACTION_SETTINGS)) }
             }
         })
-        ttsRow.addView(Button(this).apply {
-            text = "دانلود صداهای Sherpa"
-            setBackgroundColor(Color.parseColor("#1565C0"))
-            setTextColor(Color.WHITE)
-            setOnClickListener {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://k2-fsa.github.io/sherpa/onnx/tts/apk-engine.html")))
-            }
-        })
         root.addView(ttsRow)
 
-        // Keep optional cloud sections collapsed visually but not required
         root.addView(TextView(this).apply {
-            text = "\n(اختیاری — دیگر برای چت لازم نیست)\nکلیدهای ابری"
+            text = "\nاختیاری — کلید ابری (چت آفلاین به آن نیاز ندارد)"
             textSize = 13f
             setTextColor(Color.GRAY)
             setPadding(0, 16, 0, 8)
         })
-
-        fun collapsible(title: String, url: String): LinearLayout {
-            val box = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setBackgroundColor(Color.parseColor("#16162A"))
-                setPadding(16, 12, 16, 12)
-            }
-            box.addView(TextView(this).apply {
-                text = title
-                setTextColor(Color.WHITE)
-                textSize = 14f
-            })
-            box.addView(TextView(this).apply {
-                text = url
-                setTextColor(Color.parseColor("#64B5F6"))
-                textSize = 11f
-                setOnClickListener { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-            })
-            return box
-        }
-
-        val groqBox = collapsible("۱. Groq", "https://console.groq.com/keys")
         groqKey = EditText(this).apply {
-            hint = "Groq API Key"
+            hint = "Groq API Key (اختیاری)"
             setText(prefs.getString("groq_api_key", "") ?: "")
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
         groqModel = EditText(this).apply {
-            setText(prefs.getString("groq_model", "openai/gpt-oss-20b") ?: "openai/gpt-oss-20b")
+            setText(prefs.getString("groq_model", "") ?: "")
             setTextColor(Color.WHITE)
+            hint = "model"
+            setHintTextColor(Color.GRAY)
         }
         groqStatus = TextView(this).apply { setTextColor(Color.parseColor("#00E676")); text = "" }
-        groqBox.addView(groqKey); groqBox.addView(groqModel); groqBox.addView(groqStatus)
-        groqBox.addView(Button(this).apply {
-            text = "تست Groq"
-            setOnClickListener {
-                saveFields()
-                Thread {
-                    val r = ApiConnectionTester.test(
-                        groqKey.text.toString().trim(),
-                        UnoRouterProvider.GROQ_BASE,
-                        groqModel.text.toString().trim()
-                    )
-                    runOnUiThread {
-                        groqStatus.text = if (r.ok) "وضعیت: فعال" else "خطا: ${r.message}"
-                        if (r.ok) prefs.edit().putString("active_provider", "groq").apply()
-                    }
-                }.start()
-            }
-        })
-        root.addView(groqBox)
+        root.addView(groqKey)
+        root.addView(groqModel)
+        root.addView(groqStatus)
 
         setContentView(scroll)
     }
@@ -342,13 +312,4 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         }
     }
-
-    private fun passField(hint: String, value: String): EditText =
-        EditText(this).apply {
-            this.hint = hint
-            setText(value)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
 }
