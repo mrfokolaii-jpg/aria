@@ -6,44 +6,41 @@ import android.util.Log
 import java.io.File
 
 /**
- * Knowledge from user files under Download:
- * - Download/aria pdf
- * - Download/AriaPDF
- * - Download/Aria/pdf
- *
- * Supports .txt .md .csv .json and basic PDF text scrape.
+ * Knowledge from ONE primary folder: Download/aria pdf
+ * (+ app private knowledge mirror).
  */
 class LocalKnowledgeStore(private val context: Context) {
 
     data class Doc(val name: String, val path: String, val text: String)
 
+    /** Canonical user folder only. */
+    fun primaryDir(): File {
+        val dl = try {
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        } catch (_: Exception) {
+            File("/storage/emulated/0/Download")
+        }
+        return File(dl, "aria pdf")
+    }
+
     fun knowledgeDirs(): List<File> {
-        val roots = mutableListOf<File>()
-        try {
-            val dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            roots += File(dl, "aria pdf")
-            roots += File(dl, "Aria pdf")
-            roots += File(dl, "AriaPDF")
-            roots += File(dl, "Aria/pdf")
-            roots += File(dl, "aria_pdf")
-        } catch (_: Exception) {}
-        roots += File("/storage/emulated/0/Download/aria pdf")
-        roots += File("/storage/emulated/0/Download/AriaPDF")
-        roots += File("/sdcard/Download/aria pdf")
-        // App-private mirror
-        context.getExternalFilesDir("knowledge")?.let { roots += it }
-        roots += File(context.filesDir, "knowledge")
-        return roots.distinctBy { it.absolutePath }
+        val list = mutableListOf<File>()
+        list += primaryDir()
+        context.getExternalFilesDir("knowledge")?.let { list += it }
+        list += File(context.filesDir, "knowledge")
+        return list.distinctBy { it.absolutePath }
     }
 
     fun ensureFolders() {
-        knowledgeDirs().take(3).forEach { d ->
-            try { if (!d.exists()) d.mkdirs() } catch (_: Exception) {}
-        }
+        try { primaryDir().mkdirs() } catch (_: Exception) {}
+        try {
+            context.getExternalFilesDir("knowledge")?.mkdirs()
+        } catch (_: Exception) {}
     }
 
     fun listDocs(): List<Doc> {
         val out = mutableListOf<Doc>()
+        val seen = mutableSetOf<String>() // name|size
         for (dir in knowledgeDirs()) {
             if (!dir.exists() || !dir.isDirectory) continue
             dir.listFiles()?.forEach { f ->
@@ -53,28 +50,30 @@ class LocalKnowledgeStore(private val context: Context) {
                     !name.endsWith(".csv") && !name.endsWith(".json") &&
                     !name.endsWith(".pdf") && !name.endsWith(".html")
                 ) return@forEach
+                val key = "${f.name.lowercase()}|${f.length()}"
+                if (!seen.add(key)) return@forEach
                 val text = extractText(f)
                 if (text.isNotBlank()) {
                     out += Doc(f.name, f.absolutePath, text)
                 }
             }
         }
-        return out
+        return out.sortedBy { it.name.lowercase() }
     }
 
     fun statusText(): String {
         ensureFolders()
         val docs = listDocs()
-        val dirs = knowledgeDirs().filter { it.exists() }.joinToString("\n") { it.absolutePath }
+        val primary = primaryDir().absolutePath
         return if (docs.isEmpty()) {
-            "دانش خالی است.\nپوشه بساز و فایل بگذار:\nDownload/aria pdf\n\nفرمت: txt, md, pdf, json"
+            "دانش خالی است.\nفقط این پوشه را استفاده کن:\n$primary\n\nفرمت: txt, md, pdf, json"
         } else {
-            "${docs.size} فایل دانش:\n" + docs.joinToString("\n") { "• ${it.name}" } +
-                "\n\nمسیرها:\n$dirs"
+            "${docs.size} فایل دانش (بدون تکرار):\n" +
+                docs.joinToString("\n") { "• ${it.name}" } +
+                "\n\nپوشه اصلی:\n$primary"
         }
     }
 
-    /** Simple keyword retrieval — top chunks for the offline model. */
     fun retrieveRelevant(query: String, maxChars: Int = 2500): String {
         val docs = listDocs()
         if (docs.isEmpty()) return ""
@@ -92,14 +91,12 @@ class LocalKnowledgeStore(private val context: Context) {
             for (w in q) if (lower.contains(w)) score += 2
             if (doc.name.lowercase().let { n -> q.any { n.contains(it) } }) score += 5
             if (score == 0) continue
-            // pick best paragraph-ish window
             val idx = q.mapNotNull { w -> lower.indexOf(w).takeIf { it >= 0 } }.minOrNull() ?: 0
             val start = (idx - 200).coerceAtLeast(0)
             val snip = doc.text.substring(start, (start + 900).coerceAtMost(doc.text.length))
             scored += Scored(score, "[${doc.name}]\n$snip")
         }
         if (scored.isEmpty()) {
-            // fallback: first docs
             return docs.take(2).joinToString("\n\n") { "[${it.name}]\n${it.text.take(600)}" }.take(maxChars)
         }
         return scored.sortedByDescending { it.score }.take(4)
@@ -119,10 +116,8 @@ class LocalKnowledgeStore(private val context: Context) {
         }
     }
 
-    /** Very rough PDF text pull (no heavy library). */
     private fun extractPdfRough(file: File): String {
-        val bytes = file.readBytes()
-        // Prefer UTF-8 / Latin text sequences
+        val bytes = try { file.readBytes() } catch (_: Exception) { return "" }
         val sb = StringBuilder()
         val cur = StringBuilder()
         for (b in bytes) {
