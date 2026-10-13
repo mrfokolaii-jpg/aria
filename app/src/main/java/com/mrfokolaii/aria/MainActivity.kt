@@ -196,7 +196,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 try {
                     val store = LocalKnowledgeStore(this@MainActivity)
-                    store.refresh()
+                    store.ensureFolders()
                     knowledgeStatusView.text = store.statusText()
                     Toast.makeText(this@MainActivity, "دانش بروز شد", Toast.LENGTH_SHORT).show()
                 } catch (e: Exception) {
@@ -205,7 +205,6 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        // Ensure knowledge folder exists
         try {
             File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "aria pdf").mkdirs()
         } catch (_: Exception) {}
