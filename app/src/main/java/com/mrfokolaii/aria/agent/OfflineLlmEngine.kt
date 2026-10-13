@@ -52,7 +52,6 @@ class OfflineLlmEngine(private val context: Context) {
         return list.distinctBy { it.absolutePath }
     }
 
-    /** @deprecated use candidateTaskFiles / candidateGgufFiles */
     fun candidateModelFiles(): List<File> = candidateTaskFiles() + candidateGgufFiles()
 
     fun modelFile(): File =
@@ -90,7 +89,6 @@ class OfflineLlmEngine(private val context: Context) {
         loadMutex.withLock {
             if (sharedMediaPipe != null || sharedLlama != null) return@withContext true
 
-            // 1) Prefer MediaPipe .task (GPU-capable)
             val taskFile = candidateTaskFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
             if (taskFile != null) {
                 try {
@@ -100,13 +98,10 @@ class OfflineLlmEngine(private val context: Context) {
                         .setMaxTokens(512)
                         .setMaxTopK(40)
                         .setTemperature(0.7f)
-
-                    // Prefer GPU backend when API exposes it (free MediaPipe)
                     preferGpuBackend(builder)
-
                     val engine = LlmInference.createFromOptions(context, builder.build())
                     sharedMediaPipe = engine
-                    activeBackend = Backend.MEDIAPIPE_GPU // preferred; actual may fall back inside MP
+                    activeBackend = Backend.MEDIAPIPE_GPU
                     lastLoadError = null
                     loadedPath = taskFile.absolutePath
                     Log.i(TAG, "MediaPipe loaded (GPU preferred)")
@@ -118,7 +113,6 @@ class OfflineLlmEngine(private val context: Context) {
                 }
             }
 
-            // 2) GGUF CPU fallback
             val gguf = candidateGgufFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
             if (gguf == null) {
                 if (lastLoadError == null) lastLoadError = "هیچ مدل .task یا .gguf پیدا نشد"
@@ -167,7 +161,6 @@ class OfflineLlmEngine(private val context: Context) {
 
         val fullPrompt = "$SYSTEM_PROMPT\n\n$prompt"
 
-        // MediaPipe path
         sharedMediaPipe?.let { engine ->
             return@withContext try {
                 loadMutex.withLock {
@@ -180,7 +173,6 @@ class OfflineLlmEngine(private val context: Context) {
             }
         }
 
-        // GGUF path
         val model = sharedLlama ?: return@withContext "مدل null است."
         try {
             loadMutex.withLock {
@@ -214,7 +206,7 @@ class OfflineLlmEngine(private val context: Context) {
                 method.invoke(builder, gpu)
                 Log.i(TAG, "setPreferredBackend(GPU) applied")
             } else {
-                Log.i(TAG, "setPreferredBackend not in this MediaPipe version; model may still use GPU")
+                Log.i(TAG, "setPreferredBackend not in this MediaPipe version")
             }
         } catch (e: Throwable) {
             Log.i(TAG, "GPU preference optional: ${e.message}")
@@ -227,16 +219,14 @@ class OfflineLlmEngine(private val context: Context) {
         private const val TAG = "OfflineLlmEngine"
         const val MODELS_DIR = "models"
 
-        /** MediaPipe / LiteRT GPU-ready Qwen 1.5B */
         const val TASK_FILE_NAME =
             "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv1280.task"
         const val TASK_FILE_NAME_ALT = "qwen2.5-1.5b-instruct.task"
         const val TASK_DOWNLOAD_URL =
             "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv1280.task"
 
-        /** Previous GGUF CPU model */
         const val GGUF_FILE_NAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
-        const val MODEL_FILE_NAME = TASK_FILE_NAME // for ModelImportUtil default dest
+        const val MODEL_FILE_NAME = TASK_FILE_NAME
         const val MODEL_DOWNLOAD_URL = TASK_DOWNLOAD_URL
 
         private val loadMutex = Mutex()
@@ -250,6 +240,15 @@ class OfflineLlmEngine(private val context: Context) {
             private set
         @Volatile var loadedPath: String? = null
             private set
+
+        fun unloadAll() {
+            try { sharedMediaPipe?.close() } catch (_: Exception) {}
+            sharedMediaPipe = null
+            sharedLlama = null
+            activeBackend = Backend.NONE
+            loadedPath = null
+            lastLoadError = null
+        }
 
         private val SYSTEM_PROMPT =
             "تو آریا هستی. فقط فارسی، خیلی کوتاه و مستقیم جواب بده. سلام اضافه نکن مگر کاربر سلام کند."
