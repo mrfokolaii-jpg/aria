@@ -229,7 +229,6 @@ class ChatActivity : AppCompatActivity() {
         })
         root.addView(inputRow)
 
-        // Keyboard + system bars: push chat up so input sticks above IME
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
@@ -257,9 +256,9 @@ class ChatActivity : AppCompatActivity() {
         scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
     }
 
-    /** Append only new messages (voice from widget) without wiping current UI mid-type. */
     private fun syncNewMessages() {
         if (!::chatContainer.isInitialized) return
+        if (isSending) return
         val all = chatStore.loadAll()
         if (all.size < shownCount) {
             loadHistory()
@@ -290,14 +289,11 @@ class ChatActivity : AppCompatActivity() {
         inputField.hint = "پیام خود را بنویسید..."
         pendingFileUri = null
 
+        isSending = true
         chatStore.append("user", display, "chat")
-        // append already broadcasts; avoid double bubble — sync will add if count matches
-        // but we add immediately for responsiveness:
         addBubble("user", display, "chat")
         shownCount = chatStore.messageCount()
         val thinking = addBubble("assistant", "...", "chat")
-        shownCount++ // temporary thinking not in store yet
-        isSending = true
 
         scope.launch {
             try {
