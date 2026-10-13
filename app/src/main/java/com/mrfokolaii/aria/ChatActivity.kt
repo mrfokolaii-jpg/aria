@@ -1,9 +1,13 @@
 package com.mrfokolaii.aria
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -36,12 +40,20 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var chatContainer: LinearLayout
     private lateinit var scrollView: ScrollView
     private lateinit var inputField: EditText
+    private lateinit var inputRow: LinearLayout
     private lateinit var chatStore: ChatHistoryStore
     private lateinit var knowledgeMemory: PersistentMemory
     private var agentBridge: AgentBridge? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var pendingFileUri: Uri? = null
     private var isSending = false
+    private var shownCount = 0
+
+    private val chatUpdatedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            runOnUiThread { syncNewMessages() }
+        }
+    }
 
     private val filePicker = registerForActivityResult(
         ActivityResultContracts.GetContent()
@@ -63,15 +75,30 @@ class ChatActivity : AppCompatActivity() {
         loadHistory()
     }
 
+    override fun onStart() {
+        super.onStart()
+        val filter = IntentFilter(ChatHistoryStore.ACTION_CHAT_UPDATED)
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(chatUpdatedReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(chatUpdatedReceiver, filter)
+        }
+    }
+
+    override fun onStop() {
+        try { unregisterReceiver(chatUpdatedReceiver) } catch (_: Exception) {}
+        super.onStop()
+    }
+
     override fun onResume() {
         super.onResume()
-        initBridge() // reload keys after returning from settings
-        reloadBubbles()
+        initBridge()
+        syncNewMessages()
     }
 
     private fun initBridge() {
         val prefs = getSharedPreferences("aria", MODE_PRIVATE)
-
         fun load(provider: String): Triple<String, String, String> = when (provider) {
             "openrouter" -> Triple(
                 prefs.getString("openrouter_api_key", "") ?: "",
@@ -94,11 +121,8 @@ class ChatActivity : AppCompatActivity() {
                 prefs.getString("groq_model", "openai/gpt-oss-20b") ?: "openai/gpt-oss-20b"
             )
         }
-
         var provider = prefs.getString("active_provider", "groq") ?: "groq"
         var (key, endpoint, model) = load(provider)
-
-        // If active provider has no key, pick first available
         if (key.isBlank()) {
             for (p in listOf("groq", "openrouter", "xai", "custom")) {
                 val t = load(p)
@@ -112,7 +136,6 @@ class ChatActivity : AppCompatActivity() {
                 }
             }
         }
-
         agentBridge = AgentBridge(this, key, endpoint, model)
     }
 
@@ -146,6 +169,7 @@ class ChatActivity : AppCompatActivity() {
             setOnClickListener {
                 chatStore.clear()
                 chatContainer.removeAllViews()
+                shownCount = 0
             }
         })
         toolbar.addView(Button(this).apply {
@@ -163,6 +187,7 @@ class ChatActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
             )
             isFillViewport = true
+            clipToPadding = false
         }
         chatContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -171,7 +196,7 @@ class ChatActivity : AppCompatActivity() {
         scrollView.addView(chatContainer)
         root.addView(scrollView)
 
-        val inputRow = LinearLayout(this).apply {
+        inputRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#16162A"))
             setPadding(12, 12, 12, 12)
@@ -189,6 +214,7 @@ class ChatActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#252540"))
             setPadding(20, 16, 20, 16)
+            maxLines = 4
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = 8
                 marginEnd = 8
@@ -203,24 +229,48 @@ class ChatActivity : AppCompatActivity() {
         })
         root.addView(inputRow)
 
+        // Keyboard + system bars: push chat up so input sticks above IME
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(0, bars.top, 0, bars.bottom)
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            val bottom = maxOf(bars.bottom, ime.bottom)
+            v.setPadding(0, bars.top, 0, bottom)
+            scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
             insets
         }
 
         setContentView(root)
+        inputField.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) {
+                scrollView.postDelayed({ scrollView.fullScroll(View.FOCUS_DOWN) }, 120)
+            }
+        }
     }
 
     private fun loadHistory() {
+        chatContainer.removeAllViews()
+        shownCount = 0
         chatStore.loadAll().forEach { msg ->
             addBubble(msg.role, msg.text, msg.source, scroll = false)
+            shownCount++
         }
         scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
     }
 
-    private fun reloadBubbles() {
-        // keep history as-is; bridge already refreshed
+    /** Append only new messages (voice from widget) without wiping current UI mid-type. */
+    private fun syncNewMessages() {
+        if (!::chatContainer.isInitialized) return
+        val all = chatStore.loadAll()
+        if (all.size < shownCount) {
+            loadHistory()
+            return
+        }
+        if (all.size == shownCount) return
+        for (i in shownCount until all.size) {
+            val msg = all[i]
+            addBubble(msg.role, msg.text, msg.source, scroll = true)
+        }
+        shownCount = all.size
     }
 
     private fun sendMessage() {
@@ -241,25 +291,31 @@ class ChatActivity : AppCompatActivity() {
         pendingFileUri = null
 
         chatStore.append("user", display, "chat")
+        // append already broadcasts; avoid double bubble — sync will add if count matches
+        // but we add immediately for responsiveness:
         addBubble("user", display, "chat")
+        shownCount = chatStore.messageCount()
         val thinking = addBubble("assistant", "...", "chat")
+        shownCount++ // temporary thinking not in store yet
         isSending = true
 
         scope.launch {
             try {
                 initBridge()
-                val history = chatStore.loadAll().map { it.role to it.text }.takeLast(20)
+                val history = chatStore.loadAll().map { it.role to it.text }.takeLast(12)
                 val response = withContext(Dispatchers.IO) {
                     agentBridge?.processWithAgentTools(display, history)
                         ?: AgentResponse("پل ارتباطی آماده نیست.")
                 }
                 chatStore.append("assistant", response.text, "chat")
                 updateBubble(thinking, response.text)
+                shownCount = chatStore.messageCount()
                 response.toolResult?.data?.let { saveKnowledge(it) }
             } catch (e: Exception) {
                 val err = "خطا: ${e.message}"
                 chatStore.append("assistant", err, "chat")
                 updateBubble(thinking, err)
+                shownCount = chatStore.messageCount()
             } finally {
                 isSending = false
             }
