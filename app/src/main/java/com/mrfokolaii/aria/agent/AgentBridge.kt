@@ -3,6 +3,7 @@ package com.mrfokolaii.aria.agent
 import android.content.Context
 import android.util.Log
 import com.mrfokolaii.aria.agent.tools.ToolResult
+import com.mrfokolaii.aria.memory.LocalKnowledgeStore
 import com.mrfokolaii.aria.util.NetworkUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -13,9 +14,7 @@ data class AgentResponse(
     val toolResult: ToolResult? = null
 )
 
-/**
- * Bridge: local tools + offline Qwen (no cloud API).
- */
+/** Bridge: local tools + offline Qwen + local knowledge + internet search/download. */
 class AgentBridge(
     private val context: Context,
     @Suppress("UNUSED_PARAMETER") apiKey: String = "",
@@ -25,6 +24,7 @@ class AgentBridge(
 
     private val toolManager = AgentToolManager(context)
     private val offlineLlm = OfflineLlmEngine(context)
+    private val knowledgeStore = LocalKnowledgeStore(context)
     private var lastUsedModel: String? = "qwen2.5-1.5b-instruct-q4"
 
     fun setAccessibilityService(service: android.accessibilityservice.AccessibilityService?) {
@@ -37,6 +37,13 @@ class AgentBridge(
     ): AgentResponse = withContext(Dispatchers.IO) {
 
         val online = NetworkUtils.isOnline(context)
+        val lower = userInput.lowercase().replace("‌", "")
+
+        // Explicit knowledge status
+        if (containsAny(lower, "لیست دانش", "فایل دانش", "دانش من", "بروزرسانی دانش")) {
+            return@withContext AgentResponse(text = knowledgeStore.statusText())
+        }
+
         val toolIntent = detectToolIntent(userInput)
 
         if (toolIntent != null) {
@@ -44,7 +51,7 @@ class AgentBridge(
 
             if (!online && isOnlineOnlyTool(toolIntent.toolName)) {
                 return@withContext AgentResponse(
-                    text = "این کار به اینترنت نیاز دارد. بدون نت می‌تونم برنامه باز کنم، تماس بگیرم، پیامک بفرستم."
+                    text = "این کار به اینترنت نیاز دارد. بدون نت می‌تونم برنامه باز کنم، تماس بگیرم، پیامک بفرستم و از دانش محلی جواب بدهم."
                 )
             }
 
@@ -55,10 +62,21 @@ class AgentBridge(
             }
 
             return@withContext if (toolResult.success) {
-                val reply = if (toolIntent.toolName in setOf("web_browse", "app_launcher", "phone_call", "sms")) {
-                    offlineToolReply(toolIntent.toolName, toolResult)
-                } else {
-                    try {
+                val reply = when (toolIntent.toolName) {
+                    "web_browse", "app_launcher", "phone_call", "sms", "file_download" ->
+                        offlineToolReply(toolIntent.toolName, toolResult)
+                    "web_search" -> {
+                        val raw = offlineToolReply("web_search", toolResult)
+                        try {
+                            offlineLlm.chat(
+                                "نتایج جستجوی اینترنت:\n$raw\n\nسؤال کاربر: $userInput\nپاسخ کوتاه فارسی بده.",
+                                emptyList()
+                            )
+                        } catch (_: Exception) {
+                            raw.take(1500)
+                        }
+                    }
+                    else -> try {
                         generateResponseWithToolData(userInput, toolResult)
                     } catch (_: Exception) {
                         offlineToolReply(toolIntent.toolName, toolResult)
@@ -70,14 +88,18 @@ class AgentBridge(
             }
         }
 
-        // Chat: always offline Qwen
-        val text = offlineLlm.chat(userInput, conversationHistory)
+        // Chat: offline Qwen + local knowledge
+        val knowledge = try { knowledgeStore.retrieveRelevant(userInput) } catch (_: Exception) { "" }
+        val prompt = if (knowledge.isNotBlank()) {
+            "از دانش محلی زیر استفاده کن اگر مرتبط است.\n\nدانش محلی:\n$knowledge\n\nسؤال کاربر: $userInput"
+        } else userInput
+        val text = offlineLlm.chat(prompt, conversationHistory)
         lastUsedModel = "qwen2.5-1.5b-instruct-q4"
         AgentResponse(text = text)
     }
 
     private fun isOnlineOnlyTool(name: String): Boolean = when (name) {
-        "web_search", "github_search", "youtube_search",
+        "web_search", "file_download", "github_search", "youtube_search",
         "reddit_search", "rss_reader", "instagram_search", "bilibili_search" -> true
         else -> false
     }
@@ -106,6 +128,17 @@ class AgentBridge(
             "web_browse" -> {
                 val map = data as? Map<*, *>
                 map?.get("message")?.toString() ?: "سایت در مرورگر باز شد."
+            }
+            "file_download" -> {
+                val map = data as? Map<*, *>
+                map?.get("message")?.toString() ?: "دانلود انجام شد."
+            }
+            "web_search" -> {
+                when (data) {
+                    is List<*> -> data.take(5).joinToString("\n") { "• $it" }
+                    is Map<*, *> -> data["message"]?.toString() ?: data.toString()
+                    else -> data?.toString() ?: "نتیجه جستجو"
+                }
             }
             else -> {
                 when (data) {
@@ -243,8 +276,12 @@ class AgentBridge(
             return ToolIntent("accessibility_control", mapOf("action" to "back"))
         }
 
-        if (containsAny(lower, "جستجو", "سرچ", "search")) {
-            return ToolIntent("web_search", mapOf("query" to extractQuery(input)), useRouter = true)
+        if (containsAny(lower, "دانلود", "download") && extractUrl(input) != null) {
+            return ToolIntent("file_download", mapOf("url" to extractUrl(input)!!))
+        }
+
+        if (containsAny(lower, "جستجو", "سرچ", "search", "گوگل کن", "بگرد")) {
+            return ToolIntent("web_search", mapOf("query" to extractQuery(input)), useRouter = false)
         }
 
         if (containsAny(lower, "سایت", "browse", "http")) {
@@ -270,7 +307,7 @@ class AgentBridge(
     }
 
     private fun extractQuery(input: String): String =
-        input.replace(Regex("(جستجو|سرچ|search|google)\\s*", RegexOption.IGNORE_CASE), "").trim()
+        input.replace(Regex("(جستجو|سرچ|search|google|گوگل\\s*کن|بگرد)\\s*", RegexOption.IGNORE_CASE), "").trim()
 
     private fun extractUrl(input: String): String? =
         Regex("https?://\\S+").find(input)?.value
@@ -312,7 +349,8 @@ class AgentBridge(
     suspend fun getAvailableModels(): List<String> = listOf("qwen2.5-1.5b-instruct-q4_k_m")
 
     suspend fun runHealthCheck(): String =
-        toolManager.runDoctorCheck().toReadableString() + "\n" + offlineLlm.modelStatusText()
+        toolManager.runDoctorCheck().toReadableString() + "\n" +
+            offlineLlm.modelStatusText() + "\n" + knowledgeStore.statusText()
 
     fun listTools(): String {
         val tools = toolManager.listAllTools()
