@@ -25,7 +25,7 @@ class AgentBridge(
     private val toolManager = AgentToolManager(context)
     private val offlineLlm = OfflineLlmEngine(context)
     private val knowledgeStore = LocalKnowledgeStore(context)
-    private var lastUsedModel: String? = "qwen2.5-1.5b-instruct-q4"
+    private var lastUsedModel: String? = "offline"
 
     fun setAccessibilityService(service: android.accessibilityservice.AccessibilityService?) {
         toolManager.setAccessibilityService(service)
@@ -64,6 +64,17 @@ class AgentBridge(
                 val reply = when (toolIntent.toolName) {
                     "web_browse", "app_launcher", "phone_call", "sms", "file_download" ->
                         offlineToolReply(toolIntent.toolName, toolResult)
+                    "github_search" -> {
+                        val raw = formatToolResult(toolResult)
+                        try {
+                            offlineLlm.chat(
+                                "نتایج گیت‌هاب:\n$raw\n\nدرخواست: $userInput\nکوتاه فارسی خلاصه کن.",
+                                emptyList()
+                            )
+                        } catch (_: Exception) {
+                            raw.take(1500)
+                        }
+                    }
                     "web_search" -> {
                         val raw = offlineToolReply("web_search", toolResult)
                         try {
@@ -92,7 +103,7 @@ class AgentBridge(
             "دانش مرتبط:\n$knowledge\n\nسؤال: $userInput\nکوتاه جواب بده."
         } else userInput
         val text = offlineLlm.chat(prompt, conversationHistory)
-        lastUsedModel = "qwen2.5-1.5b-instruct-q4"
+        lastUsedModel = "offline"
         AgentResponse(text = text)
     }
 
@@ -150,6 +161,20 @@ class AgentBridge(
 
     private fun detectToolIntent(input: String): ToolIntent? {
         val lower = input.lowercase().replace("‌", "")
+
+        // GitHub search stays inside Aria (API) — only pure "open site" opens browser
+        if (containsAny(lower, "github", "گیتهاب", "گیت‌هاب", "گیتهب", "گیت هاب")) {
+            val onlyOpen = containsAny(lower, "باز کن", "بازکن", "برو به سایت") &&
+                !containsAny(lower, "سرچ", "جستجو", "search", "بگرد", "پیدا")
+            if (!onlyOpen) {
+                val q = input
+                    .replace(Regex("(گیت.?هاب|گیتهاب|github|سرچ|جستجو|بگرد|کن|لطفا|search)", RegexOption.IGNORE_CASE), " ")
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+                    .ifBlank { "android assistant" }
+                return ToolIntent("github_search", mapOf("action" to "search", "query" to q))
+            }
+        }
 
         val callName = Regex(
             "(?:زنگ\\s*بزن|تماس\\s*بگیر|تماس\\s*بگیره|تماس\\s*بگیرم|call)\\s*(?:به|با)?\\s*(.+)",
@@ -359,7 +384,8 @@ class AgentBridge(
 
     fun getLastUsedModel(): String? = lastUsedModel
 
-    suspend fun getAvailableModels(): List<String> = listOf("qwen2.5-1.5b-instruct-q4_k_m")
+    suspend fun getAvailableModels(): List<String> =
+        offlineLlm.listDetectedModels().ifEmpty { listOf("هیچ مدلی پیدا نشد — .task یا .gguf آپلود کن") }
 
     suspend fun runHealthCheck(): String =
         toolManager.runDoctorCheck().toReadableString() + "\n" +
