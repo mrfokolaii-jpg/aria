@@ -17,42 +17,56 @@ import java.io.File
  * On-device LLM:
  * 1) MediaPipe / LiteRT (.task) → GPU when available (free)
  * 2) llama-android GGUF → CPU fallback
+ * Auto-detects any .task / .gguf in models + Download folders.
  */
 class OfflineLlmEngine(private val context: Context) {
+
+    private fun modelSearchDirs(): List<File> {
+        val dirs = mutableListOf<File>()
+        context.getExternalFilesDir(MODELS_DIR)?.let { dirs.add(it) }
+        dirs.add(File(context.filesDir, MODELS_DIR))
+        try {
+            val dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            dirs.add(dl)
+            dirs.add(File(dl, "Aria"))
+            dirs.add(File(dl, "models"))
+        } catch (_: Exception) {}
+        dirs.add(File("/storage/emulated/0/Download"))
+        dirs.add(File("/sdcard/Download"))
+        return dirs
+    }
 
     fun candidateTaskFiles(): List<File> {
         val names = listOf(TASK_FILE_NAME, TASK_FILE_NAME_ALT)
         val list = mutableListOf<File>()
-        for (name in names) {
-            context.getExternalFilesDir(MODELS_DIR)?.let { list.add(File(it, name)) }
-            list.add(File(File(context.filesDir, MODELS_DIR), name))
-            try {
-                val dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                list.add(File(dl, name))
-                list.add(File(File(dl, "Aria"), name))
-            } catch (_: Exception) {}
-            list.add(File("/storage/emulated/0/Download/$name"))
-            list.add(File("/sdcard/Download/$name"))
+        for (dir in modelSearchDirs()) {
+            if (!dir.isDirectory) continue
+            dir.listFiles()?.filter {
+                it.isFile && it.name.endsWith(".task", true) && it.length() > 50_000_000L
+            }?.forEach { list.add(it) }
+            for (name in names) list.add(File(dir, name))
         }
         return list.distinctBy { it.absolutePath }
     }
 
     fun candidateGgufFiles(): List<File> {
-        val name = GGUF_FILE_NAME
         val list = mutableListOf<File>()
-        context.getExternalFilesDir(MODELS_DIR)?.let { list.add(File(it, name)) }
-        list.add(File(File(context.filesDir, MODELS_DIR), name))
-        try {
-            val dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            list.add(File(dl, name))
-            list.add(File(File(dl, "Aria"), name))
-        } catch (_: Exception) {}
-        list.add(File("/storage/emulated/0/Download/$name"))
-        list.add(File("/sdcard/Download/$name"))
+        for (dir in modelSearchDirs()) {
+            if (!dir.isDirectory) continue
+            dir.listFiles()?.filter {
+                it.isFile && it.name.endsWith(".gguf", true) && it.length() > 50_000_000L
+            }?.forEach { list.add(it) }
+            list.add(File(dir, GGUF_FILE_NAME))
+        }
         return list.distinctBy { it.absolutePath }
     }
 
     fun candidateModelFiles(): List<File> = candidateTaskFiles() + candidateGgufFiles()
+
+    fun listDetectedModels(): List<String> =
+        candidateModelFiles()
+            .filter { it.exists() && it.length() > 50_000_000L }
+            .map { "${it.name} (${it.length() / 1_000_000} MB)" }
 
     fun modelFile(): File =
         candidateTaskFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
@@ -67,21 +81,23 @@ class OfflineLlmEngine(private val context: Context) {
     fun modelStatusText(): String {
         val task = candidateTaskFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
         val gguf = candidateGgufFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
+        val detected = listDetectedModels()
+        val detectedBlock = if (detected.isEmpty()) "" else "\nمدل‌های پیدا شده:\n" + detected.joinToString("\n")
         return when {
             activeBackend == Backend.MEDIAPIPE_GPU && task != null ->
-                "موتور: MediaPipe GPU\n${task.name} (${task.length() / 1_000_000} MB)\n${task.absolutePath}"
+                "موتور: MediaPipe GPU\n${task.name} (${task.length() / 1_000_000} MB)\n${task.absolutePath}$detectedBlock"
             activeBackend == Backend.MEDIAPIPE_CPU && task != null ->
-                "موتور: MediaPipe (CPU)\n${task.name} (${task.length() / 1_000_000} MB)\n${task.absolutePath}"
+                "موتور: MediaPipe (CPU)\n${task.name} (${task.length() / 1_000_000} MB)\n${task.absolutePath}$detectedBlock"
             activeBackend == Backend.LLAMA_CPU && gguf != null ->
-                "موتور: GGUF CPU\n${gguf.name} (${gguf.length() / 1_000_000} MB)\n${gguf.absolutePath}"
+                "موتور: GGUF CPU\n${gguf.name} (${gguf.length() / 1_000_000} MB)\n${gguf.absolutePath}$detectedBlock"
             task != null ->
-                "مدل GPU آماده: ${task.name} (${task.length() / 1_000_000} MB)\n${task.absolutePath}\n(هنوز بارگذاری نشده)"
+                "مدل GPU آماده: ${task.name} (${task.length() / 1_000_000} MB)\n${task.absolutePath}\n(هنوز بارگذاری نشده)$detectedBlock"
             gguf != null ->
-                "مدل CPU آماده: ${gguf.name} (${gguf.length() / 1_000_000} MB)\n${gguf.absolutePath}"
+                "مدل CPU آماده: ${gguf.name} (${gguf.length() / 1_000_000} MB)\n${gguf.absolutePath}$detectedBlock"
             lastLoadError != null ->
-                "خطا:\n$lastLoadError"
+                "خطا:\n$lastLoadError$detectedBlock"
             else ->
-                "مدل پیدا نشد\nبرای GPU فایل .task را آپلود کن\nیا برای CPU همان GGUF قبلی"
+                "مدل پیدا نشد\nبرای GPU فایل .task را آپلود کن\nیا برای CPU فایل .gguf\nپوشه: Download یا models$detectedBlock"
         }
     }
 
@@ -89,7 +105,9 @@ class OfflineLlmEngine(private val context: Context) {
         loadMutex.withLock {
             if (sharedMediaPipe != null || sharedLlama != null) return@withContext true
 
-            val taskFile = candidateTaskFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
+            val taskFile = candidateTaskFiles()
+                .filter { it.exists() && it.length() > 50_000_000L }
+                .maxByOrNull { it.length() }
             if (taskFile != null) {
                 try {
                     Log.i(TAG, "Loading MediaPipe model ${taskFile.absolutePath}")
@@ -130,7 +148,9 @@ class OfflineLlmEngine(private val context: Context) {
                 }
             }
 
-            val gguf = candidateGgufFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
+            val gguf = candidateGgufFiles()
+                .filter { it.exists() && it.length() > 50_000_000L }
+                .maxByOrNull { it.length() }
             if (gguf == null) {
                 if (lastLoadError == null) lastLoadError = "هیچ مدل .task یا .gguf پیدا نشد"
                 return@withContext false
@@ -163,7 +183,7 @@ class OfflineLlmEngine(private val context: Context) {
                 appendLine("مدل آفلاین آماده نیست.")
                 lastLoadError?.let { appendLine("علت: $it") }
                 appendLine("برای GPU: فایل .task را از تنظیمات آپلود کن")
-                appendLine("لینک مدل GPU:")
+                appendLine("لینک مدل GPU پیشنهادی:")
                 appendLine(TASK_DOWNLOAD_URL)
             }
         }
@@ -247,6 +267,7 @@ class OfflineLlmEngine(private val context: Context) {
         }
 
         private val SYSTEM_PROMPT =
-            "تو آریا هستی. فقط فارسی، خیلی کوتاه و مستقیم جواب بده. سلام اضافه نکن مگر کاربر سلام کند."
+            "تو آریا هستی، دستیار فارسی روی گوشی. همیشه به فارسی روان و طبیعی جواب بده. " +
+                "جمله‌ها کوتاه، واضح و بدون انگلیسی اضافه. سلام بی‌مورد نگو. اگر ابزار اجرا شد نتیجه را ساده توضیح بده."
     }
 }
