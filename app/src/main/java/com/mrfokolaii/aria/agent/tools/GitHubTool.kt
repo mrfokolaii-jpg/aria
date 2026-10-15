@@ -10,6 +10,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URLEncoder
 
 class GitHubTool(private val client: OkHttpClient, private val context: Context? = null) : AgentTool {
     override val name = "github_search"
@@ -20,7 +21,6 @@ class GitHubTool(private val client: OkHttpClient, private val context: Context?
 
     override suspend fun execute(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
         val action = params["action"]?.toString() ?: "search"
-
         try {
             when (action) {
                 "search" -> searchRepositories(params)
@@ -39,10 +39,12 @@ class GitHubTool(private val client: OkHttpClient, private val context: Context?
     }
 
     private suspend fun searchRepositories(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
-        val query = params["query"]?.toString()
+        val query = params["query"]?.toString()?.trim()
             ?: return@withContext ToolResult(false, null, "Query is required")
+        if (query.isBlank()) {
+            return@withContext ToolResult(false, null, "عبارت جستجو خالی است")
+        }
 
-        // First check Knowledge Base
         knowledgeBase?.let { kb ->
             val kbResults = kb.search(query)
             if (kbResults.isNotEmpty()) {
@@ -50,8 +52,13 @@ class GitHubTool(private val client: OkHttpClient, private val context: Context?
             }
         }
 
-        val url = "https://api.github.com/search/repositories?q=${query.replace(" ", "+")}&sort=stars&per_page=10"
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val url = "https://api.github.com/search/repositories?q=$encoded&sort=stars&order=desc&per_page=8"
         val json = fetchGitHubAPI(url)
+        if (!json.has("items")) {
+            val msg = json.optString("message", "پاسخ نامعتبر از گیت‌هاب")
+            return@withContext ToolResult(false, null, "GitHub: $msg")
+        }
         val items = json.getJSONArray("items")
 
         val results = mutableListOf<Map<String, Any>>()
@@ -59,100 +66,89 @@ class GitHubTool(private val client: OkHttpClient, private val context: Context?
             val item = items.getJSONObject(i)
             val fullName = item.getString("full_name")
             val inKB = knowledgeBase?.hasProject(fullName) ?: false
-
-            results.add(mapOf(
-                "name" to fullName,
-                "description" to item.optString("description", ""),
-                "url" to item.getString("html_url"),
-                "stars" to item.getInt("stargazers_count"),
-                "language" to item.optString("language", "Unknown"),
-                "in_knowledge_base" to inKB
-            ))
+            results.add(
+                mapOf(
+                    "name" to fullName,
+                    "description" to item.optString("description", ""),
+                    "url" to item.getString("html_url"),
+                    "stars" to item.getInt("stargazers_count"),
+                    "language" to item.optString("language", "Unknown"),
+                    "in_knowledge_base" to inKB
+                )
+            )
         }
 
-        ToolResult(true, mapOf(
-            "results" to results,
-            "message" to "Found ${results.size} repositories. Use 'save_to_kb' to document one."
-        ))
+        ToolResult(
+            true,
+            mapOf(
+                "results" to results,
+                "message" to "Found ${results.size} repositories"
+            )
+        )
     }
 
     private fun getFile(params: Map<String, Any>): ToolResult {
-        val repo = params["repo"]?.toString()
-            ?: return ToolResult(false, null, "Repo is required")
-        val path = params["path"]?.toString()
-            ?: return ToolResult(false, null, "Path is required")
+        val repo = params["repo"]?.toString() ?: return ToolResult(false, null, "Repo is required")
+        val path = params["path"]?.toString() ?: return ToolResult(false, null, "Path is required")
         val branch = params["branch"]?.toString() ?: "main"
-
         val url = "https://api.github.com/repos/$repo/contents/$path?ref=$branch"
         val json = fetchGitHubAPI(url)
-
         val content = json.optString("content", "")
         val decoded = if (content.isNotEmpty()) {
             String(android.util.Base64.decode(content.replace("\n", ""), android.util.Base64.DEFAULT))
-        } else {
-            ""
-        }
-
-        return ToolResult(true, mapOf(
-            "path" to path,
-            "content" to decoded,
-            "size" to json.optInt("size", 0)
-        ))
+        } else ""
+        return ToolResult(true, mapOf("path" to path, "content" to decoded, "size" to json.optInt("size", 0)))
     }
 
     private fun listIssues(params: Map<String, Any>): ToolResult {
-        val repo = params["repo"]?.toString()
-            ?: return ToolResult(false, null, "Repo is required")
+        val repo = params["repo"]?.toString() ?: return ToolResult(false, null, "Repo is required")
         val state = params["state"]?.toString() ?: "open"
-
-        val url = "https://api.github.com/repos/$repo/issues?state=$state&per_page=20"
-        val array = fetchGitHubAPIArray(url)
-
-        val issues = mutableListOf<Map<String, Any>>()
-        for (i in 0 until array.length()) {
-            val issue = array.getJSONObject(i)
-            issues.add(mapOf(
-                "number" to issue.getInt("number"),
-                "title" to issue.getString("title"),
-                "state" to issue.getString("state"),
-                "url" to issue.getString("html_url"),
-                "created_at" to issue.getString("created_at")
-            ))
+        val url = "https://api.github.com/repos/$repo/issues?state=$state&per_page=10"
+        val arr = fetchGitHubAPIArray(url)
+        val results = mutableListOf<Map<String, Any>>()
+        for (i in 0 until arr.length()) {
+            val item = arr.getJSONObject(i)
+            results.add(
+                mapOf(
+                    "number" to item.getInt("number"),
+                    "title" to item.getString("title"),
+                    "state" to item.getString("state"),
+                    "url" to item.getString("html_url")
+                )
+            )
         }
-
-        return ToolResult(true, issues)
+        return ToolResult(true, mapOf("issues" to results))
     }
 
     private fun getReadme(params: Map<String, Any>): ToolResult {
-        val repo = params["repo"]?.toString()
-            ?: return ToolResult(false, null, "Repo is required")
-
+        val repo = params["repo"]?.toString() ?: return ToolResult(false, null, "Repo is required")
         val url = "https://api.github.com/repos/$repo/readme"
         val json = fetchGitHubAPI(url)
-
         val content = json.optString("content", "")
         val decoded = if (content.isNotEmpty()) {
             String(android.util.Base64.decode(content.replace("\n", ""), android.util.Base64.DEFAULT))
-        } else {
-            ""
-        }
-
-        return ToolResult(true, mapOf(
-            "content" to decoded,
-            "name" to json.optString("name", "README.md")
-        ))
+        } else ""
+        return ToolResult(true, mapOf("content" to decoded.take(8000)))
     }
 
     private fun fetchGitHubAPI(url: String): JSONObject {
         val request = Request.Builder()
             .url(url)
-            .header("Accept", "application/vnd.github.v3+json")
-            .header("User-Agent", "ARIA-Agent")
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "Aria-Android-Assistant")
             .build()
-
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
-            val body = response.body?.string() ?: throw Exception("Empty response")
+            val body = response.body?.string() ?: ""
+            if (!response.isSuccessful) {
+                val detail = try {
+                    JSONObject(body).optString("message", body.take(200))
+                } catch (_: Exception) {
+                    body.take(200)
+                }
+                throw Exception("HTTP ${response.code}: $detail")
+            }
+            if (body.isBlank()) throw Exception("Empty response")
             return JSONObject(body)
         }
     }
@@ -160,14 +156,65 @@ class GitHubTool(private val client: OkHttpClient, private val context: Context?
     private fun fetchGitHubAPIArray(url: String): JSONArray {
         val request = Request.Builder()
             .url(url)
-            .header("Accept", "application/vnd.github.v3+json")
-            .header("User-Agent", "ARIA-Agent")
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "Aria-Android-Assistant")
             .build()
-
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
-            val body = response.body?.string() ?: throw Exception("Empty response")
+            val body = response.body?.string() ?: ""
+            if (!response.isSuccessful) throw Exception("HTTP ${response.code}: ${body.take(200)}")
             return JSONArray(body)
+        }
+    }
+
+    private suspend fun saveToKnowledgeBase(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
+        val kb = knowledgeBase ?: return@withContext ToolResult(false, null, "Knowledge Base not available")
+        val repo = params["repo"]?.toString() ?: return@withContext ToolResult(false, null, "repo required")
+        val purpose = params["purpose"]?.toString() ?: ""
+        val notes = params["notes"]?.toString() ?: ""
+        val project = ProjectKnowledge(
+            repoFullName = repo,
+            url = "https://github.com/$repo",
+            purpose = purpose,
+            language = params["language"]?.toString() ?: "",
+            notes = notes,
+            lastReviewed = System.currentTimeMillis()
+        )
+        kb.saveProject(project)
+        ToolResult(true, mapOf("saved" to repo))
+    }
+
+    private suspend fun searchKnowledgeBase(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
+        val kb = knowledgeBase ?: return@withContext ToolResult(false, null, "Knowledge Base not available")
+        val query = params["query"]?.toString() ?: return@withContext ToolResult(false, null, "Query parameter required")
+        val results = kb.search(query)
+        ToolResult(
+            true,
+            mapOf(
+                "results" to results.map {
+                    mapOf(
+                        "repo" to it.repoFullName,
+                        "url" to it.url,
+                        "purpose" to it.purpose,
+                        "language" to it.language,
+                        "last_reviewed" to it.lastReviewed
+                    )
+                },
+                "count" to results.size
+            )
+        )
+    }
+
+    private suspend fun checkKnowledgeBase(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
+        val kb = knowledgeBase ?: return@withContext ToolResult(false, null, "Knowledge Base not available")
+        val repo = params["repo"]?.toString()
+        if (repo != null) {
+            val exists = kb.hasProject(repo)
+            val project = if (exists) kb.getProject(repo) else null
+            ToolResult(true, mapOf("repo" to repo, "exists" to exists, "project" to project))
+        } else {
+            val allProjects = kb.listAll()
+            ToolResult(true, mapOf("projects" to allProjects, "count" to allProjects.size))
         }
     }
 
@@ -176,113 +223,17 @@ class GitHubTool(private val client: OkHttpClient, private val context: Context?
         try {
             val request = Request.Builder()
                 .url("https://api.github.com/zen")
-                .header("User-Agent", "ARIA-Agent")
+                .header("User-Agent", "Aria-Android-Assistant")
                 .build()
-
             client.newCall(request).execute().use { response ->
-                val latency = System.currentTimeMillis() - start
                 HealthStatus(
                     isHealthy = response.isSuccessful,
-                    latencyMs = latency,
+                    latencyMs = System.currentTimeMillis() - start,
                     message = if (response.isSuccessful) "OK" else "HTTP ${response.code}"
                 )
             }
         } catch (e: Exception) {
-            HealthStatus(
-                isHealthy = false,
-                latencyMs = System.currentTimeMillis() - start,
-                message = e.message ?: "Unknown error"
-            )
-        }
-    }
-
-    private suspend fun saveToKnowledgeBase(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
-        val kb = knowledgeBase
-            ?: return@withContext ToolResult(false, null, "Knowledge Base not available")
-
-        val repo = params["repo"]?.toString()
-            ?: return@withContext ToolResult(false, null, "Repo parameter required")
-
-        try {
-            // Fetch README for description
-            val readme = try {
-                val readmeResult = getReadme(mapOf("repo" to repo))
-                if (readmeResult.success) {
-                    (readmeResult.data as? Map<*, *>)?.get("content")?.toString()?.take(2000) ?: ""
-                } else ""
-            } catch (e: Exception) {
-                ""
-            }
-
-            // Fetch repo info
-            val url = "https://api.github.com/repos/$repo"
-            val json = fetchGitHubAPI(url)
-
-            val knowledge = ProjectKnowledge(
-                repoFullName = repo,
-                url = json.getString("html_url"),
-                purpose = params["purpose"]?.toString() ?: "General use",
-                description = readme.ifEmpty { json.optString("description", "") },
-                language = json.optString("language", "Unknown"),
-                lastReviewed = KnowledgeBase.getCurrentTimestamp(),
-                technologies = listOf(json.optString("language", "Unknown")),
-                notes = params["notes"]?.toString() ?: ""
-            )
-
-            kb.saveProject(knowledge)
-
-            ToolResult(true, mapOf(
-                "repo" to repo,
-                "message" to "Saved $repo to Knowledge Base"
-            ))
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save to KB", e)
-            ToolResult(false, null, "Failed to save: ${e.message}")
-        }
-    }
-
-    private suspend fun searchKnowledgeBase(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
-        val kb = knowledgeBase
-            ?: return@withContext ToolResult(false, null, "Knowledge Base not available")
-
-        val query = params["query"]?.toString()
-            ?: return@withContext ToolResult(false, null, "Query parameter required")
-
-        val results = kb.search(query)
-
-        ToolResult(true, mapOf(
-            "results" to results.map { mapOf(
-                "repo" to it.repoFullName,
-                "url" to it.url,
-                "purpose" to it.purpose,
-                "language" to it.language,
-                "last_reviewed" to it.lastReviewed
-            ) },
-            "count" to results.size
-        ))
-    }
-
-    private suspend fun checkKnowledgeBase(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
-        val kb = knowledgeBase
-            ?: return@withContext ToolResult(false, null, "Knowledge Base not available")
-
-        val repo = params["repo"]?.toString()
-
-        if (repo != null) {
-            val exists = kb.hasProject(repo)
-            val project = if (exists) kb.getProject(repo) else null
-
-            return@withContext ToolResult(true, mapOf(
-                "repo" to repo,
-                "exists" to exists,
-                "project" to project
-            ))
-        } else {
-            val allProjects = kb.listAll()
-            return@withContext ToolResult(true, mapOf(
-                "projects" to allProjects,
-                "count" to allProjects.size
-            ))
+            HealthStatus(false, System.currentTimeMillis() - start, e.message ?: "Unknown error")
         }
     }
 
@@ -290,28 +241,10 @@ class GitHubTool(private val client: OkHttpClient, private val context: Context?
         put("action", JSONObject().apply {
             put("type", "string")
             put("required", true)
-            put("enum", listOf("search", "get_file", "list_issues", "get_readme", "save_to_kb", "search_kb", "check_kb"))
         })
-        put("query", JSONObject().apply {
-            put("type", "string")
-            put("description", "Search query")
-        })
-        put("repo", JSONObject().apply {
-            put("type", "string")
-            put("description", "Repository full name (owner/repo)")
-        })
-        put("path", JSONObject().apply {
-            put("type", "string")
-            put("description", "File path")
-        })
-        put("purpose", JSONObject().apply {
-            put("type", "string")
-            put("description", "Project purpose (for save_to_kb)")
-        })
-        put("notes", JSONObject().apply {
-            put("type", "string")
-            put("description", "Additional notes (for save_to_kb)")
-        })
+        put("query", JSONObject().apply { put("type", "string") })
+        put("repo", JSONObject().apply { put("type", "string") })
+        put("path", JSONObject().apply { put("type", "string") })
     }
 
     companion object {
