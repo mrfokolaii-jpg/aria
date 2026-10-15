@@ -22,7 +22,7 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
         try {
             val results = searchDuckDuckGo(query, maxResults)
             if (results.isNotEmpty()) {
-                return@withContext ToolResult(true, results, mapOf("engine" to "DuckDuckGo", "count" to results.size))
+                return@withContext ToolResult(true, results, null, mapOf("engine" to "DuckDuckGo", "count" to results.size))
             }
         } catch (e: Exception) {
             Log.w(TAG, "DuckDuckGo HTML failed: ${e.message}")
@@ -31,7 +31,7 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
         try {
             val results = searchDuckDuckGoApi(query, maxResults)
             if (results.isNotEmpty()) {
-                return@withContext ToolResult(true, results, mapOf("engine" to "DuckDuckGo-API", "count" to results.size))
+                return@withContext ToolResult(true, results, null, mapOf("engine" to "DuckDuckGo-API", "count" to results.size))
             }
         } catch (e: Exception) {
             Log.w(TAG, "DuckDuckGo API failed: ${e.message}")
@@ -40,7 +40,7 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
         try {
             val results = searchWikipedia(query, maxResults)
             if (results.isNotEmpty()) {
-                return@withContext ToolResult(true, results, mapOf("engine" to "Wikipedia", "count" to results.size))
+                return@withContext ToolResult(true, results, null, mapOf("engine" to "Wikipedia", "count" to results.size))
             }
         } catch (e: Exception) {
             Log.w(TAG, "Wikipedia failed: ${e.message}")
