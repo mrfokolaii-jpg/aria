@@ -17,7 +17,7 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
     override suspend fun execute(params: Map<String, Any>): ToolResult = withContext(Dispatchers.IO) {
         val query = params["query"]?.toString()?.trim()
             ?: return@withContext ToolResult(false, null, "Query parameter is required")
-        val maxResults = (params["max_results"] as? Int) ?: 8
+        val maxResults = (params["max_results"] as? Int) ?: 6
         val errors = mutableListOf<String>()
 
         try {
@@ -27,7 +27,6 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             }
         } catch (e: Exception) {
             errors.add("wiki-fa: ${e.message}")
-            Log.w(TAG, "Wikipedia FA failed: ${e.message}")
         }
 
         try {
@@ -37,7 +36,16 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             }
         } catch (e: Exception) {
             errors.add("wiki-en: ${e.message}")
-            Log.w(TAG, "Wikipedia EN failed: ${e.message}")
+        }
+
+        try {
+            val results = searchGoogle(query, maxResults)
+            if (results.isNotEmpty()) {
+                return@withContext ToolResult(true, results, null, mapOf("engine" to "Google", "count" to results.size))
+            }
+        } catch (e: Exception) {
+            errors.add("google: ${e.message}")
+            Log.w(TAG, "Google failed: ${e.message}")
         }
 
         try {
@@ -47,7 +55,6 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             }
         } catch (e: Exception) {
             errors.add("ddg-api: ${e.message}")
-            Log.w(TAG, "DuckDuckGo API failed: ${e.message}")
         }
 
         try {
@@ -57,7 +64,6 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             }
         } catch (e: Exception) {
             errors.add("bing: ${e.message}")
-            Log.w(TAG, "Bing RSS failed: ${e.message}")
         }
 
         try {
@@ -67,18 +73,25 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             }
         } catch (e: Exception) {
             errors.add("ddg-html: ${e.message}")
-            Log.w(TAG, "DuckDuckGo HTML failed: ${e.message}")
         }
 
-        ToolResult(
-            false,
-            null,
-            "جستجو ناموفق بود (${errors.take(2).joinToString("; ")}). اتصال یا VPN را بررسی کن."
-        )
+        ToolResult(false, null, "جستجو ناموفق بود (${errors.take(2).joinToString("; ")}). اتصال یا VPN را بررسی کن.")
     }
 
     private fun toMap(title: String, url: String, snippet: String): Map<String, String> =
-        mapOf("title" to title, "url" to url, "snippet" to snippet)
+        mapOf(
+            "title" to clean(title),
+            "url" to clean(url),
+            "snippet" to clean(snippet)
+        )
+
+    private fun clean(s: String): String =
+        s.replace("&", "&")
+            .replace("&#39;", "'")
+            .replace(""", "\"")
+            .replace("&nbsp;", " ")
+            .replace(Regex("<[^>]+>"), "")
+            .trim()
 
     private fun searchWikipedia(query: String, maxResults: Int, lang: String): List<Map<String, String>> {
         val encoded = URLEncoder.encode(query, "UTF-8")
@@ -104,13 +117,34 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
         }
     }
 
+    private fun searchGoogle(query: String, maxResults: Int): List<Map<String, String>> {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val url = "https://www.google.com/search?q=$encoded&hl=fa&num=$maxResults"
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+            .header("Accept-Language", "fa-IR,fa;q=0.9,en-US;q=0.8")
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+            val html = response.body?.string() ?: return emptyList()
+            val out = mutableListOf<Map<String, String>>()
+            val alt = Regex("href=\"/(?:url\\?q=)?(https?://[^\"&]+)[^\"]*\"[^>]*>([^<]{10,120})</a>", RegexOption.IGNORE_CASE)
+            for (m in alt.findAll(html)) {
+                val link = m.groupValues[1]
+                val title = clean(m.groupValues[2])
+                if (link.contains("google.") || title.length < 8) continue
+                out.add(toMap(title, link, ""))
+                if (out.size >= maxResults) break
+            }
+            return out.distinctBy { it["url"] }.take(maxResults)
+        }
+    }
+
     private fun searchDuckDuckGoApi(query: String, maxResults: Int): List<Map<String, String>> {
         val encoded = URLEncoder.encode(query, "UTF-8")
         val url = "https://api.duckduckgo.com/?q=$encoded&format=json&no_html=1&skip_disambig=1"
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", "Aria-Android-Assistant/1.0")
-            .build()
+        val request = Request.Builder().url(url).header("User-Agent", "Aria-Android-Assistant/1.0").build()
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
             val body = response.body?.string() ?: return emptyList()
@@ -157,9 +191,7 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
                 val title = titleRegex.find(block)?.let { it.groupValues[1].ifBlank { it.groupValues[2] } }?.trim().orEmpty()
                 val link = linkRegex.find(block)?.groupValues?.get(1)?.trim().orEmpty()
                 val desc = descRegex.find(block)?.let { it.groupValues[1].ifBlank { it.groupValues[2] } }?.replace(Regex("<[^>]+>"), "")?.trim().orEmpty()
-                if (title.isNotBlank() || link.isNotBlank()) {
-                    out.add(toMap(title, link, desc.take(200)))
-                }
+                if (title.isNotBlank() || link.isNotBlank()) out.add(toMap(title, link, desc.take(200)))
             }
             return out
         }
@@ -206,7 +238,7 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
 
     override fun getParamsSchema(): JSONObject = JSONObject().apply {
         put("query", JSONObject().apply { put("type", "string"); put("required", true) })
-        put("max_results", JSONObject().apply { put("type", "integer"); put("default", 8) })
+        put("max_results", JSONObject().apply { put("type", "integer"); put("default", 6) })
     }
 
     companion object {
