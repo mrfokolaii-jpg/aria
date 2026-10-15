@@ -17,16 +17,10 @@ object ModelImportUtil {
 
     fun status(context: Context): String = OfflineLlmEngine(context).modelStatusText()
 
-    /** Copy content URI into app models folder (.task for GPU or .gguf for CPU). */
+    /** Copy content URI into app models folder (Gemma-4 E4B .litertlm). */
     fun importFromUri(context: Context, uri: Uri): Result<File> {
         return try {
-            val segment = (uri.lastPathSegment ?: "model").lowercase()
-            val cleanName = when {
-                segment.endsWith(".gguf") || segment.contains("gguf") ->
-                    OfflineLlmEngine.GGUF_FILE_NAME
-                else -> OfflineLlmEngine.TASK_FILE_NAME
-            }
-            val dest = appModelFile(context, cleanName)
+            val dest = appModelFile(context, OfflineLlmEngine.MODEL_FILE_NAME)
             val tmp = File(dest.absolutePath + ".part")
             context.contentResolver.openInputStream(uri).use { input ->
                 if (input == null) return Result.failure(Exception("نتوانستم فایل را باز کنم"))
@@ -40,10 +34,11 @@ object ModelImportUtil {
                     output.flush()
                 }
             }
-            if (tmp.length() < 50_000_000L) {
+            if (tmp.length() < 100_000_000L) {
+                val len = tmp.length()
                 tmp.delete()
                 return Result.failure(
-                    Exception("فایل خیلی کوچک است (${tmp.length()} بایت) — مدل کامل را انتخاب کن")
+                    Exception("فایل خیلی کوچک است ($len بایت) — gemma-4-E4B-it.litertlm کامل را انتخاب کن")
                 )
             }
             if (dest.exists()) dest.delete()
