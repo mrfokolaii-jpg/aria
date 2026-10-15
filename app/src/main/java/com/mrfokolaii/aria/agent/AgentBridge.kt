@@ -32,6 +32,11 @@ class AgentBridge(
             return@withContext AgentResponse(text = knowledgeStore.statusText())
         }
 
+        if (isCapabilityQuestion(lower)) {
+            try { onStatus("💬 پاسخ سریع…") } catch (_: Exception) {}
+            return@withContext AgentResponse(text = capabilityAnswer(lower))
+        }
+
         val toolIntent = detectToolIntent(userInput)
 
         if (toolIntent != null) {
@@ -79,7 +84,7 @@ class AgentBridge(
                             appendLine(raw.ifBlank { "(نتیجه‌ای نبود)" })
                             if (summary.isNotBlank()) {
                                 appendLine()
-                                append("💡 ").append(summary.take(500))
+                                append("💡 ").append(summary.take(400))
                             }
                         }
                     }
@@ -97,7 +102,7 @@ class AgentBridge(
                             appendLine(raw.ifBlank { "(نتیجه‌ای نبود)" })
                             if (summary.isNotBlank()) {
                                 appendLine()
-                                append("💡 ").append(summary.take(500))
+                                append("💡 ").append(summary.take(400))
                             }
                         }
                     }
@@ -114,8 +119,7 @@ class AgentBridge(
 
         try { onStatus("🧠 در حال فکر کردن و خواندن حافظه…") } catch (_: Exception) {}
 
-        val prompt = userInput
-        val text = offlineLlm.chat(prompt, conversationHistory)
+        val text = offlineLlm.chat(userInput, conversationHistory)
         AgentResponse(text = text)
     }
 
@@ -128,7 +132,7 @@ class AgentBridge(
     private fun formatToolResult(toolResult: ToolResult): String {
         val data = toolResult.data
         return when (data) {
-            is List<*> -> data.take(8).joinToString("\n") { item ->
+            is List<*> -> data.take(4).joinToString("\n") { item ->
                 when (item) {
                     is Map<*, *> -> {
                         val title = item["title"] ?: item["name"] ?: ""
@@ -142,7 +146,7 @@ class AgentBridge(
             is Map<*, *> -> {
                 val results = data["results"]
                 if (results is List<*>) {
-                    results.take(8).joinToString("\n") { item ->
+                    results.take(4).joinToString("\n") { item ->
                         if (item is Map<*, *>) {
                             val title = item["title"] ?: item["name"] ?: ""
                             val url = item["url"] ?: ""
@@ -155,7 +159,7 @@ class AgentBridge(
                 } else data.toString()
             }
             else -> data?.toString() ?: (toolResult.error ?: "")
-        }
+        }.let { htmlDecode(it) }
     }
 
     private fun offlineToolReply(toolName: String, toolResult: ToolResult): String {
@@ -211,6 +215,43 @@ class AgentBridge(
 
     private fun containsAny(text: String, vararg keys: String): Boolean =
         keys.any { text.contains(it) }
+
+    private fun isCapabilityQuestion(lower: String): Boolean {
+        val ask = containsAny(lower, "میتونی", "می‌تونی", "می تونی", "می‌توانی", "میتوانی", "بلدی", "داری")
+        val topic = containsAny(
+            lower, "صحبت", "حرف بزن", "صدا", "ویس", "جستجو", "سرچ", "اینترنت",
+            "گیتهاب", "گیت‌هاب", "github", "تماس", "پیامک", "اپ", "برنامه"
+        )
+        return ask && topic
+    }
+
+    private fun capabilityAnswer(lower: String): String {
+        return when {
+            containsAny(lower, "صحبت", "حرف بزن", "صدا", "ویس") ->
+                "بله، با صدای بلند جواب می‌دم. بگو چی کار برات انجام بدم."
+            containsAny(lower, "گیتهاب", "گیت‌هاب", "github") &&
+                containsAny(lower, "اینترنت", "جستجو", "سرچ") ->
+                "بله، هم اینترنت و هم گیت‌هاب را سرچ می‌کنم. موضوع را بگو تا همان را پیدا کنم."
+            containsAny(lower, "گیتهاب", "گیت‌هاب", "github") ->
+                "بله، گیت‌هاب را سرچ می‌کنم. نام پروژه یا موضوع را بگو."
+            containsAny(lower, "اینترنت", "جستجو", "سرچ") ->
+                "بله، اینترنت را سرچ می‌کنم. بگو دنبال چی بگردم."
+            containsAny(lower, "تماس") ->
+                "بله، می‌تونم مخاطب را پیدا کنم و تماس بگیرم. اسم را بگو."
+            containsAny(lower, "پیامک") ->
+                "بله، می‌تونم پیامک آماده کنم. بگو برای کی و چه متنی."
+            else ->
+                "بله، سرچ اینترنت و گیت‌هاب، تماس، پیامک، باز کردن اپ و پاسخ صوتی را انجام می‌دم. دستورت را بگو."
+        }
+    }
+
+    private fun htmlDecode(s: String): String =
+        s.replace("&", "&")
+            .replace("<", "<")
+            .replace(">", ">")
+            .replace(""", "\"")
+            .replace("&#39;", "'")
+            .replace("&nbsp;", " ")
 
     private data class ToolIntent(
         val toolName: String,
