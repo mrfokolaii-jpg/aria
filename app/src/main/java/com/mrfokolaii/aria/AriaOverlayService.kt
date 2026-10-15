@@ -144,7 +144,12 @@ class AriaOverlayService : Service() {
                 chatStore?.append("assistant", reply, "voice")
                 updateButton("ARIA", 0xFF00C853.toInt())
                 updateStatus("در حال پخش پاسخ…")
-                speak(reply) {
+                val speakText = when {
+                    reply.contains("💡") -> reply.substringAfter("💡").trim().take(350)
+                    reply.length > 280 -> reply.take(280) + "…"
+                    else -> reply
+                }
+                speak(speakText) {
                     armIdleTimer()
                     updateStatus("منتظر دستور بعدی (۳۰ ثانیه)")
                     updateButton("آماده", 0xFFFF9800.toInt())
