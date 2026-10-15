@@ -3,23 +3,29 @@ package com.mrfokolaii.aria.agent
 import android.content.Context
 import android.os.Environment
 import android.util.Log
-import com.google.mediapipe.tasks.genai.llminference.LlmInference
-import dev.ffmpegkit.llama.Llama
-import dev.ffmpegkit.llama.LlamaConfig
-import dev.ffmpegkit.llama.LlamaModel
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * On-device LLM:
- * 1) MediaPipe / LiteRT (.task) → GPU when available (free)
- * 2) llama-android GGUF → CPU fallback
- * Auto-detects any .task / .gguf in models + Download folders.
- */
+/** Gemma-4 E4B only — LiteRT-LM with GPU preferred. */
 class OfflineLlmEngine(private val context: Context) {
+
+    fun requestStop() {
+        globalCancel.set(true)
+        Log.i(TAG, "Stop requested")
+    }
+
+    fun clearStop() {
+        globalCancel.set(false)
+    }
 
     private fun modelSearchDirs(): List<File> {
         val dirs = mutableListOf<File>()
@@ -36,140 +42,97 @@ class OfflineLlmEngine(private val context: Context) {
         return dirs
     }
 
-    fun candidateTaskFiles(): List<File> {
-        val names = listOf(TASK_FILE_NAME, TASK_FILE_NAME_ALT)
+    fun candidateLitertFiles(): List<File> {
         val list = mutableListOf<File>()
         for (dir in modelSearchDirs()) {
             if (!dir.isDirectory) continue
             dir.listFiles()?.filter {
-                it.isFile && it.name.endsWith(".task", true) && it.length() > 50_000_000L
+                it.isFile &&
+                    (it.name.contains("E4B", true) || it.name.equals(MODEL_FILE_NAME, true)) &&
+                    it.name.endsWith(".litertlm", true) &&
+                    it.length() > 100_000_000L
             }?.forEach { list.add(it) }
-            for (name in names) list.add(File(dir, name))
+            list.add(File(dir, MODEL_FILE_NAME))
         }
         return list.distinctBy { it.absolutePath }
     }
-
-    fun candidateGgufFiles(): List<File> {
-        val list = mutableListOf<File>()
-        for (dir in modelSearchDirs()) {
-            if (!dir.isDirectory) continue
-            dir.listFiles()?.filter {
-                it.isFile && it.name.endsWith(".gguf", true) && it.length() > 50_000_000L
-            }?.forEach { list.add(it) }
-            list.add(File(dir, GGUF_FILE_NAME))
-        }
-        return list.distinctBy { it.absolutePath }
-    }
-
-    fun candidateModelFiles(): List<File> = candidateTaskFiles() + candidateGgufFiles()
-
-    fun listDetectedModels(): List<String> =
-        candidateModelFiles()
-            .filter { it.exists() && it.length() > 50_000_000L }
-            .map { "${it.name} (${it.length() / 1_000_000} MB)" }
 
     fun modelFile(): File =
-        candidateTaskFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
-            ?: candidateGgufFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
-            ?: (context.getExternalFilesDir(MODELS_DIR)?.let { File(it, TASK_FILE_NAME) }
-                ?: File(context.filesDir, "$MODELS_DIR/$TASK_FILE_NAME"))
+        candidateLitertFiles().firstOrNull { it.exists() && it.length() > 100_000_000L }
+            ?: (context.getExternalFilesDir(MODELS_DIR)?.let { File(it, MODEL_FILE_NAME) }
+                ?: File(context.filesDir, "$MODELS_DIR/$MODEL_FILE_NAME"))
 
     fun isModelPresent(): Boolean =
-        candidateTaskFiles().any { it.exists() && it.length() > 50_000_000L } ||
-            candidateGgufFiles().any { it.exists() && it.length() > 50_000_000L }
+        candidateLitertFiles().any { it.exists() && it.length() > 100_000_000L }
+
+    fun listDetectedModels(): List<String> =
+        candidateLitertFiles()
+            .filter { it.exists() && it.length() > 100_000_000L }
+            .map { "${it.name} (${it.length() / 1_000_000} MB)" }
 
     fun modelStatusText(): String {
-        val task = candidateTaskFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
-        val gguf = candidateGgufFiles().firstOrNull { it.exists() && it.length() > 50_000_000L }
-        val detected = listDetectedModels()
-        val detectedBlock = if (detected.isEmpty()) "" else "\nمدل‌های پیدا شده:\n" + detected.joinToString("\n")
+        val f = candidateLitertFiles().firstOrNull { it.exists() && it.length() > 100_000_000L }
         return when {
-            activeBackend == Backend.MEDIAPIPE_GPU && task != null ->
-                "موتور: MediaPipe GPU\n${task.name} (${task.length() / 1_000_000} MB)\n${task.absolutePath}$detectedBlock"
-            activeBackend == Backend.MEDIAPIPE_CPU && task != null ->
-                "موتور: MediaPipe (CPU)\n${task.name} (${task.length() / 1_000_000} MB)\n${task.absolutePath}$detectedBlock"
-            activeBackend == Backend.LLAMA_CPU && gguf != null ->
-                "موتور: GGUF CPU\n${gguf.name} (${gguf.length() / 1_000_000} MB)\n${gguf.absolutePath}$detectedBlock"
-            task != null ->
-                "مدل GPU آماده: ${task.name} (${task.length() / 1_000_000} MB)\n${task.absolutePath}\n(هنوز بارگذاری نشده)$detectedBlock"
-            gguf != null ->
-                "مدل CPU آماده: ${gguf.name} (${gguf.length() / 1_000_000} MB)\n${gguf.absolutePath}$detectedBlock"
+            activeBackend == BackendKind.GPU && f != null ->
+                "موتور: LiteRT-LM GPU\nGemma-4 E4B\n${f.name} (${f.length() / 1_000_000} MB)\n${f.absolutePath}"
+            activeBackend == BackendKind.CPU && f != null ->
+                "موتور: LiteRT-LM CPU\nGemma-4 E4B\n${f.name} (${f.length() / 1_000_000} MB)\n${f.absolutePath}"
+            f != null ->
+                "مدل آماده: ${f.name} (${f.length() / 1_000_000} MB)\n${f.absolutePath}\n(هنوز بارگذاری نشده)"
             lastLoadError != null ->
-                "خطا:\n$lastLoadError$detectedBlock"
+                "خطا:\n$lastLoadError\n\nدانلود:\n$MODEL_DOWNLOAD_URL"
             else ->
-                "مدل پیدا نشد\nبرای GPU فایل .task را آپلود کن\nیا برای CPU فایل .gguf\nپوشه: Download یا models$detectedBlock"
+                "مدل Gemma-4 E4B پیدا نشد\nفایل .litertlm را در Download بگذار یا آپلود کن\n\n$MODEL_DOWNLOAD_URL"
         }
     }
 
     suspend fun ensureLoaded(): Boolean = withContext(Dispatchers.IO) {
         loadMutex.withLock {
-            if (sharedMediaPipe != null || sharedLlama != null) return@withContext true
-
-            val taskFile = candidateTaskFiles()
-                .filter { it.exists() && it.length() > 50_000_000L }
+            if (sharedEngine != null) return@withContext true
+            val model = candidateLitertFiles()
+                .filter { it.exists() && it.length() > 100_000_000L }
                 .maxByOrNull { it.length() }
-            if (taskFile != null) {
-                try {
-                    Log.i(TAG, "Loading MediaPipe model ${taskFile.absolutePath}")
-                    val options = LlmInference.LlmInferenceOptions.builder()
-                        .setModelPath(taskFile.absolutePath)
-                        .setMaxTokens(512)
-                        .setMaxTopK(40)
-                        .setPreferredBackend(LlmInference.Backend.GPU)
-                        .build()
-                    val engine = LlmInference.createFromOptions(context, options)
-                    sharedMediaPipe = engine
-                    activeBackend = Backend.MEDIAPIPE_GPU
-                    lastLoadError = null
-                    loadedPath = taskFile.absolutePath
-                    Log.i(TAG, "MediaPipe loaded with preferredBackend=GPU")
-                    return@withContext true
-                } catch (e: Throwable) {
-                    Log.e(TAG, "MediaPipe GPU load failed, trying DEFAULT", e)
-                    try {
-                        val options = LlmInference.LlmInferenceOptions.builder()
-                            .setModelPath(taskFile.absolutePath)
-                            .setMaxTokens(512)
-                            .setMaxTopK(40)
-                            .setPreferredBackend(LlmInference.Backend.DEFAULT)
-                            .build()
-                        val engine = LlmInference.createFromOptions(context, options)
-                        sharedMediaPipe = engine
-                        activeBackend = Backend.MEDIAPIPE_CPU
-                        lastLoadError = null
-                        loadedPath = taskFile.absolutePath
-                        Log.i(TAG, "MediaPipe loaded with DEFAULT backend")
-                        return@withContext true
-                    } catch (e2: Throwable) {
-                        Log.e(TAG, "MediaPipe load failed, will try GGUF", e2)
-                        lastLoadError = "MediaPipe: ${e2.javaClass.simpleName}: ${e2.message}"
-                        sharedMediaPipe = null
-                    }
-                }
-            }
-
-            val gguf = candidateGgufFiles()
-                .filter { it.exists() && it.length() > 50_000_000L }
-                .maxByOrNull { it.length() }
-            if (gguf == null) {
-                if (lastLoadError == null) lastLoadError = "هیچ مدل .task یا .gguf پیدا نشد"
+            if (model == null) {
+                lastLoadError = "فایل gemma-4-E4B-it.litertlm پیدا نشد"
                 return@withContext false
             }
             try {
-                val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
-                Log.i(TAG, "Loading GGUF ${gguf.absolutePath} threads=$threads")
-                val config = LlamaConfig(contextSize = 1024, threads = threads)
-                val model = Llama.loadModel(modelPath = gguf.absolutePath, config = config)
-                sharedLlama = model
-                activeBackend = Backend.LLAMA_CPU
+                Log.i(TAG, "Loading GPU ${model.absolutePath}")
+                val config = EngineConfig(
+                    modelPath = model.absolutePath,
+                    backend = Backend.GPU(),
+                    cacheDir = context.cacheDir.absolutePath
+                )
+                val engine = Engine(config)
+                engine.initialize()
+                sharedEngine = engine
+                activeBackend = BackendKind.GPU
                 lastLoadError = null
-                loadedPath = gguf.absolutePath
-                Log.i(TAG, "GGUF CPU model loaded")
-                true
+                loadedPath = model.absolutePath
+                Log.i(TAG, "Loaded on GPU")
+                return@withContext true
             } catch (e: Throwable) {
-                lastLoadError = "GGUF: ${e.javaClass.simpleName}: ${e.message}"
-                Log.e(TAG, "Llama.loadModel failed", e)
-                false
+                Log.e(TAG, "GPU failed", e)
+                lastLoadError = "GPU: ${e.message}"
+            }
+            try {
+                val config = EngineConfig(
+                    modelPath = model.absolutePath,
+                    backend = Backend.CPU(),
+                    cacheDir = context.cacheDir.absolutePath
+                )
+                val engine = Engine(config)
+                engine.initialize()
+                sharedEngine = engine
+                activeBackend = BackendKind.CPU
+                lastLoadError = null
+                loadedPath = model.absolutePath
+                Log.i(TAG, "Loaded on CPU")
+                return@withContext true
+            } catch (e2: Throwable) {
+                lastLoadError = "CPU: ${e2.message}"
+                sharedEngine = null
+                return@withContext false
             }
         }
     }
@@ -178,79 +141,80 @@ class OfflineLlmEngine(private val context: Context) {
         userMessage: String,
         history: List<Pair<String, String>> = emptyList()
     ): String = withContext(Dispatchers.IO) {
+        clearStop()
         if (!ensureLoaded()) {
-            return@withContext buildString {
-                appendLine("مدل آفلاین آماده نیست.")
-                lastLoadError?.let { appendLine("علت: $it") }
-                appendLine("برای GPU: فایل .task را از تنظیمات آپلود کن")
-                appendLine("لینک مدل GPU پیشنهادی:")
-                appendLine(TASK_DOWNLOAD_URL)
-            }
+            return@withContext "مدل Gemma-4 E4B آماده نیست.\n$lastLoadError\n$MODEL_DOWNLOAD_URL"
         }
+        if (globalCancel.get()) return@withContext "متوقف شد."
+        val engine = sharedEngine ?: return@withContext "موتور null"
 
-        val prompt = buildString {
-            history.takeLast(3).forEach { (role, content) ->
-                if (role == "user") append("کاربر: ${content.take(200)}\n")
-                else append("آریا: ${content.take(200)}\n")
-            }
-            append("کاربر: ${userMessage.take(500)}\nآریا:")
-        }
-
-        val fullPrompt = "$SYSTEM_PROMPT\n\n$prompt"
-
-        sharedMediaPipe?.let { engine ->
-            return@withContext try {
-                loadMutex.withLock {
-                    val result = engine.generateResponse(fullPrompt)
-                    result.trim().ifBlank { "پاسخی تولید نشد." }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "MediaPipe generate failed", e)
-                "خطا در GPU/MediaPipe: ${e.message}"
-            }
-        }
-
-        val model = sharedLlama ?: return@withContext "مدل null است."
         try {
             loadMutex.withLock {
-                val result = Llama.complete(
-                    model = model,
-                    prompt = prompt,
-                    systemPrompt = SYSTEM_PROMPT,
-                    maxTokens = 120
+                if (globalCancel.get()) return@withContext "متوقف شد."
+                val config = ConversationConfig(
+                    systemInstruction = Contents.of(SYSTEM_PROMPT)
                 )
-                result.text.trim().ifBlank { "پاسخی تولید نشد." }
+                val conversation = engine.createConversation(config)
+                try {
+                    val prompt = buildString {
+                        history.takeLast(4).forEach { (role, content) ->
+                            if (role == "user") append("کاربر: ${content.take(180)}\n")
+                            else append("آریا: ${content.take(180)}\n")
+                        }
+                        append(userMessage.take(1800))
+                    }
+                    if (globalCancel.get()) return@withContext "متوقف شد."
+                    val resp = conversation.sendMessage(prompt)
+                    if (globalCancel.get()) return@withContext "متوقف شد."
+                    extractText(resp).ifBlank { resp.toString().take(2500) }
+                } finally {
+                    try { conversation.close() } catch (_: Exception) {}
+                }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "complete failed", e)
-            "خطا در تولید پاسخ: ${e.message}"
+            if (globalCancel.get()) return@withContext "متوقف شد."
+            Log.e(TAG, "chat failed", e)
+            "خطا: ${e.message}"
         }
     }
 
-    fun release() {}
+    private fun extractText(msg: Any?): String {
+        if (msg == null) return ""
+        return try {
+            for (name in listOf("getText", "text", "getContent")) {
+                try {
+                    val m = msg.javaClass.methods.find { it.name == name && it.parameterCount == 0 }
+                    val v = m?.invoke(msg)?.toString()
+                    if (!v.isNullOrBlank() && !v.startsWith("Message") && v.length < 8000) return v.trim()
+                } catch (_: Exception) {}
+            }
+            val s = msg.toString()
+            Regex("text[=:]\\s*([^,\\]\\}]+)").find(s)?.groupValues?.getOrNull(1)?.trim() ?: s.take(3000)
+        } catch (_: Exception) {
+            msg.toString().take(2000)
+        }
+    }
 
-    enum class Backend { NONE, MEDIAPIPE_GPU, MEDIAPIPE_CPU, LLAMA_CPU }
+    fun release() {
+        requestStop()
+        unloadAll()
+    }
+
+    enum class BackendKind { NONE, GPU, CPU }
 
     companion object {
         private const val TAG = "OfflineLlmEngine"
         const val MODELS_DIR = "models"
-
-        const val TASK_FILE_NAME =
-            "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv1280.task"
-        const val TASK_FILE_NAME_ALT = "qwen2.5-1.5b-instruct.task"
-        const val TASK_DOWNLOAD_URL =
-            "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv1280.task"
-
-        const val GGUF_FILE_NAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
-        const val MODEL_FILE_NAME = TASK_FILE_NAME
-        const val MODEL_DOWNLOAD_URL = TASK_DOWNLOAD_URL
+        const val MODEL_FILE_NAME = "gemma-4-E4B-it.litertlm"
+        const val MODEL_DOWNLOAD_URL =
+            "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm"
 
         private val loadMutex = Mutex()
-        @Volatile var sharedMediaPipe: LlmInference? = null
+        private val globalCancel = AtomicBoolean(false)
+
+        @Volatile var sharedEngine: Engine? = null
             private set
-        @Volatile var sharedLlama: LlamaModel? = null
-            private set
-        @Volatile var activeBackend: Backend = Backend.NONE
+        @Volatile var activeBackend: BackendKind = BackendKind.NONE
             private set
         @Volatile var lastLoadError: String? = null
             private set
@@ -258,16 +222,15 @@ class OfflineLlmEngine(private val context: Context) {
             private set
 
         fun unloadAll() {
-            try { sharedMediaPipe?.close() } catch (_: Exception) {}
-            sharedMediaPipe = null
-            sharedLlama = null
-            activeBackend = Backend.NONE
+            try { sharedEngine?.close() } catch (_: Exception) {}
+            sharedEngine = null
+            activeBackend = BackendKind.NONE
             loadedPath = null
             lastLoadError = null
         }
 
-        private val SYSTEM_PROMPT =
-            "تو آریا هستی، دستیار فارسی روی گوشی. همیشه به فارسی روان و طبیعی جواب بده. " +
-                "جمله‌ها کوتاه، واضح و بدون انگلیسی اضافه. سلام بی‌مورد نگو. اگر ابزار اجرا شد نتیجه را ساده توضیح بده."
+        private const val SYSTEM_PROMPT =
+            "تو آریا هستی، دستیار هوشمند فارسی روی گوشی. همیشه فارسی روان و کوتاه جواب بده. " +
+                "سلام بی‌مورد نگو. برای تماس، پیامک، باز کردن اپ و جستجو دقیق و عملی باش."
     }
 }
