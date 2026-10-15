@@ -11,6 +11,9 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class GitHubTool(private val client: OkHttpClient, private val context: Context? = null) : AgentTool {
     override val name = "github_search"
@@ -176,9 +179,10 @@ class GitHubTool(private val client: OkHttpClient, private val context: Context?
             repoFullName = repo,
             url = "https://github.com/$repo",
             purpose = purpose,
+            description = notes.ifBlank { purpose },
             language = params["language"]?.toString() ?: "",
-            notes = notes,
-            lastReviewed = System.currentTimeMillis()
+            lastReviewed = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()),
+            notes = notes
         )
         kb.saveProject(project)
         ToolResult(true, mapOf("saved" to repo))
