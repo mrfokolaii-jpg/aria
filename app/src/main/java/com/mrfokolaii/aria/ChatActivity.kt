@@ -293,15 +293,16 @@ class ChatActivity : AppCompatActivity() {
         chatStore.append("user", display, "chat")
         addBubble("user", display, "chat")
         shownCount = chatStore.messageCount()
-        val thinking = addBubble("assistant", "در حال خواندن حافظه و فکر کردن…", "chat")
+        val thinking = addBubble("assistant", "⏳ در حال آماده‌سازی…", "chat")
 
         scope.launch {
             try {
                 initBridge()
                 val history = chatStore.loadAll().map { it.role to it.text }.takeLast(12)
                 val response = withContext(Dispatchers.IO) {
-                    agentBridge?.processWithAgentTools(display, history)
-                        ?: AgentResponse("پل ارتباطی آماده نیست.")
+                    agentBridge?.processWithAgentTools(display, history) { status ->
+                        runOnUiThread { updateBubble(thinking, status) }
+                    } ?: AgentResponse("پل ارتباطی آماده نیست.")
                 }
                 chatStore.append("assistant", response.text, "chat")
                 updateBubble(thinking, response.text)
