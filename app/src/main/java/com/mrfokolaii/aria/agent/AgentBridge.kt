@@ -2,9 +2,8 @@ package com.mrfokolaii.aria.agent
 
 import android.content.Context
 import android.util.Log
-import com.mrfokolaii.aria.agent.tools.AgentToolManager
 import com.mrfokolaii.aria.agent.tools.ToolResult
-import com.mrfokolaii.aria.memory.PersistentMemory
+import com.mrfokolaii.aria.memory.LocalKnowledgeStore
 import com.mrfokolaii.aria.util.NetworkUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -18,7 +17,7 @@ class AgentBridge(
 ) {
     private val toolManager = AgentToolManager(context)
     private val offlineLlm = OfflineLlmEngine(context)
-    private val knowledgeStore = PersistentMemory(context)
+    private val knowledgeStore = LocalKnowledgeStore(context)
 
     suspend fun processWithAgentTools(
         userInput: String,
@@ -69,7 +68,7 @@ class AgentBridge(
                     "github_search" -> {
                         val raw = formatToolResult(toolResult)
                         try {
-                            try { onStatus("🧠 نتایج گیت‌هاب آماده — در حال فکر کردن و خلاصه‌سازی…") } catch (_: Exception) {}
+                            try { onStatus("🧠 نتایج گیت‌هاب آماده — در حال فکر کردن…") } catch (_: Exception) {}
                             offlineLlm.chat(
                                 "نتایج گیت‌هاب:\n$raw\n\nدرخواست: $userInput\nکوتاه فارسی خلاصه کن.",
                                 emptyList()
@@ -81,7 +80,7 @@ class AgentBridge(
                     "web_search" -> {
                         val raw = offlineToolReply("web_search", toolResult)
                         try {
-                            try { onStatus("🧠 نتایج جستجو آماده — در حال فکر کردن و خلاصه‌سازی…") } catch (_: Exception) {}
+                            try { onStatus("🧠 نتایج جستجو آماده — در حال فکر کردن…") } catch (_: Exception) {}
                             offlineLlm.chat(
                                 "نتایج جستجو:\n$raw\n\nسؤال: $userInput\nخیلی کوتاه فارسی جواب بده.",
                                 emptyList()
