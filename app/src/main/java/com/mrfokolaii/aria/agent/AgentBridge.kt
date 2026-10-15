@@ -67,26 +67,38 @@ class AgentBridge(
                         offlineToolReply(toolIntent.toolName, toolResult)
                     "github_search" -> {
                         val raw = formatToolResult(toolResult)
-                        try {
-                            try { onStatus("🧠 نتایج گیت‌هاب آماده — در حال فکر کردن…") } catch (_: Exception) {}
+                        try { onStatus("🧠 نتایج گیت‌هاب آماده — در حال فکر کردن…") } catch (_: Exception) {}
+                        val summary = try {
                             offlineLlm.chat(
-                                "نتایج گیت‌هاب:\n$raw\n\nدرخواست: $userInput\nکوتاه فارسی خلاصه کن.",
+                                "این نتایج گیت‌هاب را در ۲-۳ جمله فارسی خلاصه کن و بهترین مخزن را پیشنهاد بده:\n$raw",
                                 emptyList()
                             )
-                        } catch (_: Exception) {
-                            raw.take(1500)
+                        } catch (_: Exception) { "" }
+                        buildString {
+                            appendLine("🐙 نتایج جستجوی گیت‌هاب:")
+                            appendLine(raw.ifBlank { "(نتیجه‌ای نبود)" })
+                            if (summary.isNotBlank()) {
+                                appendLine()
+                                append("💡 ").append(summary.take(500))
+                            }
                         }
                     }
                     "web_search" -> {
                         val raw = offlineToolReply("web_search", toolResult)
-                        try {
-                            try { onStatus("🧠 نتایج جستجو آماده — در حال فکر کردن…") } catch (_: Exception) {}
+                        try { onStatus("🧠 نتایج جستجو آماده — در حال فکر کردن…") } catch (_: Exception) {}
+                        val summary = try {
                             offlineLlm.chat(
-                                "نتایج جستجو:\n$raw\n\nسؤال: $userInput\nخیلی کوتاه فارسی جواب بده.",
+                                "این نتایج جستجو را کوتاه فارسی جواب بده:\n$raw\n\nسؤال: $userInput",
                                 emptyList()
                             )
-                        } catch (_: Exception) {
-                            raw.take(1200)
+                        } catch (_: Exception) { "" }
+                        buildString {
+                            appendLine("🔍 نتایج جستجوی اینترنت:")
+                            appendLine(raw.ifBlank { "(نتیجه‌ای نبود)" })
+                            if (summary.isNotBlank()) {
+                                appendLine()
+                                append("💡 ").append(summary.take(500))
+                            }
                         }
                     }
                     else -> formatToolResult(toolResult)
@@ -168,6 +180,11 @@ class AgentBridge(
                     .ifBlank { input.trim().ifBlank { "open source" } }
                 return ToolIntent("github_search", mapOf("action" to "search", "query" to q))
             }
+        }
+
+        if (containsAny(lower, "گودو", "godot", "موتور بازی", "unity", "unreal", "flutter", "react native")) {
+            val q = extractQuery(input).ifBlank { input.trim() }
+            return ToolIntent("github_search", mapOf("action" to "search", "query" to q))
         }
 
         if (containsAny(lower, "جستجو", "سرچ", "search", "گوگل کن", "بگرد")) {
