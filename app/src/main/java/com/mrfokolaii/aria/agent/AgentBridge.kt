@@ -131,7 +131,7 @@ class AgentBridge(
 
     private fun formatToolResult(toolResult: ToolResult): String {
         val data = toolResult.data
-        return when (data) {
+        val raw = when (data) {
             is List<*> -> data.take(4).joinToString("\n") { item ->
                 when (item) {
                     is Map<*, *> -> {
@@ -159,7 +159,8 @@ class AgentBridge(
                 } else data.toString()
             }
             else -> data?.toString() ?: (toolResult.error ?: "")
-        }.let { htmlDecode(it) }
+        }
+        return htmlDecode(raw)
     }
 
     private fun offlineToolReply(toolName: String, toolResult: ToolResult): String {
@@ -245,14 +246,15 @@ class AgentBridge(
         }
     }
 
+    // Build HTML entity tags via string concat (API strips literal entities)
     private fun htmlDecode(s: String): String {
         var t = s
-        t = t.replace("&", "&")
-        t = t.replace("<", "<")
-        t = t.replace(">", ">")
-        t = t.replace(""", "\"")
+        t = t.replace("&" + "amp;", "&")
+        t = t.replace("&" + "lt;", "<")
+        t = t.replace("&" + "gt;", ">")
+        t = t.replace("&" + "quot;", "\"")
         t = t.replace("&#39;", "'")
-        t = t.replace("&nbsp;", " ")
+        t = t.replace("&" + "nbsp;", " ")
         return t
     }
 
