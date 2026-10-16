@@ -23,6 +23,7 @@ class AgentToolManager(private val context: android.content.Context? = null) {
 
     private val enhancedAccessibility = EnhancedAccessibilityTool()
     private val mcpLoaded = AtomicBoolean(false)
+    @Volatile private var loadedMcpUrl: String = ""
 
     init {
         registerAllTools()
@@ -70,22 +71,34 @@ class AgentToolManager(private val context: android.content.Context? = null) {
         Log.d(TAG, "Registered ${registry.getAllTools().size} tools")
     }
 
+    fun invalidateMcpCache() {
+        mcpLoaded.set(false)
+        loadedMcpUrl = ""
+        registry.unregisterByPrefix("mcp_")
+    }
+
     /**
-     * Load remote MCP tools once per process when enabled in prefs.
+     * Load remote MCP tools when enabled in prefs.
      * Prefs: mcp_enabled=true, mcp_server_url=https://host/mcp
      */
-    suspend fun ensureMcpToolsLoaded(): Int = withContext(Dispatchers.IO) {
-        if (mcpLoaded.get()) {
-            return@withContext registry.getAllTools().count { it.name.startsWith("mcp_") }
-        }
+    suspend fun ensureMcpToolsLoaded(force: Boolean = false): Int = withContext(Dispatchers.IO) {
         val ctx = context ?: return@withContext 0
         val prefs = ctx.getSharedPreferences("aria", Context.MODE_PRIVATE)
         val enabled = prefs.getBoolean(McpClient.PREF_ENABLED, false)
         val url = prefs.getString(McpClient.PREF_URL, "")?.trim().orEmpty()
+
         if (!enabled || url.isBlank()) {
+            registry.unregisterByPrefix("mcp_")
             mcpLoaded.set(true)
+            loadedMcpUrl = ""
             return@withContext 0
         }
+
+        if (!force && mcpLoaded.get() && loadedMcpUrl == url) {
+            return@withContext registry.getAllTools().count { it.name.startsWith("mcp_") }
+        }
+
+        registry.unregisterByPrefix("mcp_")
         try {
             val mcp = McpClient(url, client)
             val remoteTools = mcp.listTools()
@@ -101,11 +114,13 @@ class AgentToolManager(private val context: android.content.Context? = null) {
                 }
             }
             mcpLoaded.set(true)
+            loadedMcpUrl = url
             Log.i(TAG, "MCP loaded $count tools from $url")
             count
         } catch (e: Exception) {
             Log.e(TAG, "MCP load failed", e)
             mcpLoaded.set(true)
+            loadedMcpUrl = url
             0
         }
     }
