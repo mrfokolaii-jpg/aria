@@ -95,11 +95,12 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
         )
 
     private fun clean(s: String): String {
+        val e = Char(38).toString()
         var t = s
-        t = t.replace("&", "&")
-        t = t.replace("&#39;", "'")
-        t = t.replace(""", "\"")
-        t = t.replace("&nbsp;", " ")
+        t = t.replace(e + "a" + "mp;", e)
+        t = t.replace(e + "#39;", "'")
+        t = t.replace(e + "q" + "uot;", "\"")
+        t = t.replace(e + "n" + "bsp;", " ")
         t = t.replace(Regex("<[^>]+>"), "")
         return t.trim()
     }
@@ -235,16 +236,13 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
             val html = response.body?.string() ?: throw Exception("Empty response")
             val results = mutableListOf<Map<String, String>>()
-            val resultRegex = Regex(
-                "class=\"result__a\" href=\"([^\"]+)\"[^>]*>([^<]+)</a>"
-            )
-            val snippetRegex = Regex(
-                "class=\"result__snippet\"[^>]*>([^<]+)</"
-            )
+            val resultRegex = Regex("class=\"result__a\" href=\"([^\"]+)\"[^>]*>([^<]+)</a>")
+            val snippetRegex = Regex("class=\"result__snippet\"[^>]*>([^<]+)</")
             val matches = resultRegex.findAll(html).take(maxResults)
             val snippets = snippetRegex.findAll(html).take(maxResults).map { it.groupValues[1].trim() }.toList()
+            val e = Char(38).toString()
             matches.forEachIndexed { index, match ->
-                val link = match.groupValues[1].replace("&", "&")
+                val link = match.groupValues[1].replace(e + "a" + "mp;", e)
                 val title = match.groupValues[2].trim()
                 val snippet = snippets.getOrNull(index) ?: ""
                 if (link.startsWith("http")) results.add(toMap(title, link, snippet))
