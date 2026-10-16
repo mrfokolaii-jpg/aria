@@ -52,7 +52,6 @@ class McpClient(
             val result = rpc("initialize", params)
             if (result != null) {
                 initialized = true
-                // Best-effort initialized notification (some servers ignore)
                 try {
                     rpcNotify("notifications/initialized", JSONObject())
                 } catch (_: Exception) {}
@@ -76,7 +75,8 @@ class McpClient(
             val out = mutableListOf<McpToolInfo>()
             for (i in 0 until tools.length()) {
                 val t = tools.optJSONObject(i) ?: continue
-                val name = t.optString("name").ifBlank { continue }
+                val name = t.optString("name")
+                if (name.isBlank()) continue
                 out.add(
                     McpToolInfo(
                         name = name,
@@ -182,7 +182,6 @@ class McpClient(
             if (!response.isSuccessful) {
                 throw Exception("HTTP ${response.code}: ${raw.take(300)}")
             }
-            // Support plain JSON or simple SSE data lines
             val jsonText = if (raw.trimStart().startsWith("event:") || raw.contains("data:")) {
                 raw.lineSequence()
                     .map { it.trim() }
