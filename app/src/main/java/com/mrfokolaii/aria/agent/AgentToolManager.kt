@@ -1,11 +1,15 @@
 package com.mrfokolaii.aria.agent
 
+import android.content.Context
 import android.util.Log
+import com.mrfokolaii.aria.agent.mcp.McpClient
+import com.mrfokolaii.aria.agent.mcp.McpRemoteTool
 import com.mrfokolaii.aria.agent.tools.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class AgentToolManager(private val context: android.content.Context? = null) {
     private val client = OkHttpClient.Builder()
@@ -18,6 +22,7 @@ class AgentToolManager(private val context: android.content.Context? = null) {
     private val router = ToolRouter(registry)
 
     private val enhancedAccessibility = EnhancedAccessibilityTool()
+    private val mcpLoaded = AtomicBoolean(false)
 
     init {
         registerAllTools()
@@ -65,6 +70,46 @@ class AgentToolManager(private val context: android.content.Context? = null) {
         Log.d(TAG, "Registered ${registry.getAllTools().size} tools")
     }
 
+    /**
+     * Load remote MCP tools once per process when enabled in prefs.
+     * Prefs: mcp_enabled=true, mcp_server_url=https://host/mcp
+     */
+    suspend fun ensureMcpToolsLoaded(): Int = withContext(Dispatchers.IO) {
+        if (mcpLoaded.get()) {
+            return@withContext registry.getAllTools().count { it.name.startsWith("mcp_") }
+        }
+        val ctx = context ?: return@withContext 0
+        val prefs = ctx.getSharedPreferences("aria", Context.MODE_PRIVATE)
+        val enabled = prefs.getBoolean(McpClient.PREF_ENABLED, false)
+        val url = prefs.getString(McpClient.PREF_URL, "")?.trim().orEmpty()
+        if (!enabled || url.isBlank()) {
+            mcpLoaded.set(true)
+            return@withContext 0
+        }
+        try {
+            val mcp = McpClient(url, client)
+            val remoteTools = mcp.listTools()
+            var count = 0
+            for (info in remoteTools) {
+                try {
+                    registry.register(
+                        McpRemoteTool(mcp, info.name, info.description, info.inputSchema)
+                    )
+                    count++
+                } catch (e: Exception) {
+                    Log.w(TAG, "MCP register ${info.name}: ${e.message}")
+                }
+            }
+            mcpLoaded.set(true)
+            Log.i(TAG, "MCP loaded $count tools from $url")
+            count
+        } catch (e: Exception) {
+            Log.e(TAG, "MCP load failed", e)
+            mcpLoaded.set(true)
+            0
+        }
+    }
+
     suspend fun executeToolByName(toolName: String, params: Map<String, Any>): ToolResult {
         val tool = registry.getTool(toolName)
             ?: return ToolResult(false, null, "Tool not found: $toolName")
@@ -89,7 +134,11 @@ class AgentToolManager(private val context: android.content.Context? = null) {
         }
     }
 
+    fun listMcpTools(): List<String> =
+        registry.getAllTools().filter { it.name.startsWith("mcp_") }.map { it.name }
+
     suspend fun runDoctorCheck(): DoctorReport = withContext(Dispatchers.IO) {
+        ensureMcpToolsLoaded()
         val healthResults = registry.checkAllHealth()
         val healthy = healthResults.filter { it.value.isHealthy }
         val unhealthy = healthResults.filter { !it.value.isHealthy }
