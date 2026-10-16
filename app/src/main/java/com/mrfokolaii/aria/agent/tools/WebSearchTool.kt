@@ -27,6 +27,7 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             }
         } catch (e: Exception) {
             errors.add("wiki-fa: ${e.message}")
+            Log.w(TAG, "Wikipedia FA failed: ${e.message}")
         }
 
         try {
@@ -36,6 +37,7 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             }
         } catch (e: Exception) {
             errors.add("wiki-en: ${e.message}")
+            Log.w(TAG, "Wikipedia EN failed: ${e.message}")
         }
 
         try {
@@ -55,6 +57,7 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             }
         } catch (e: Exception) {
             errors.add("ddg-api: ${e.message}")
+            Log.w(TAG, "DuckDuckGo API failed: ${e.message}")
         }
 
         try {
@@ -64,6 +67,7 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             }
         } catch (e: Exception) {
             errors.add("bing: ${e.message}")
+            Log.w(TAG, "Bing RSS failed: ${e.message}")
         }
 
         try {
@@ -73,9 +77,14 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             }
         } catch (e: Exception) {
             errors.add("ddg-html: ${e.message}")
+            Log.w(TAG, "DuckDuckGo HTML failed: ${e.message}")
         }
 
-        ToolResult(false, null, "جستجو ناموفق بود (${errors.take(2).joinToString("; ")}). اتصال یا VPN را بررسی کن.")
+        ToolResult(
+            false,
+            null,
+            "جستجو ناموفق بود (${errors.take(2).joinToString("; ")}). اتصال یا VPN را بررسی کن."
+        )
     }
 
     private fun toMap(title: String, url: String, snippet: String): Map<String, String> =
@@ -85,13 +94,15 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             "snippet" to clean(snippet)
         )
 
-    private fun clean(s: String): String =
-        s.replace("&", "&")
-            .replace("&#39;", "'")
-            .replace(""", "\"")
-            .replace("&nbsp;", " ")
-            .replace(Regex("<[^>]+>"), "")
-            .trim()
+    private fun clean(s: String): String {
+        var t = s
+        t = t.replace("&", "&")
+        t = t.replace("&#39;", "'")
+        t = t.replace(""", "\"")
+        t = t.replace("&nbsp;", " ")
+        t = t.replace(Regex("<[^>]+>"), "")
+        return t.trim()
+    }
 
     private fun searchWikipedia(query: String, maxResults: Int, lang: String): List<Map<String, String>> {
         val encoded = URLEncoder.encode(query, "UTF-8")
@@ -144,7 +155,10 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
     private fun searchDuckDuckGoApi(query: String, maxResults: Int): List<Map<String, String>> {
         val encoded = URLEncoder.encode(query, "UTF-8")
         val url = "https://api.duckduckgo.com/?q=$encoded&format=json&no_html=1&skip_disambig=1"
-        val request = Request.Builder().url(url).header("User-Agent", "Aria-Android-Assistant/1.0").build()
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Aria-Android-Assistant/1.0")
+            .build()
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
             val body = response.body?.string() ?: return emptyList()
@@ -154,7 +168,13 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             val abstractUrl = json.optString("AbstractURL", "")
             val heading = json.optString("Heading", query)
             if (abstractText.isNotBlank()) {
-                out.add(toMap(heading.ifBlank { query }, abstractUrl.ifBlank { "https://duckduckgo.com/?q=$encoded" }, abstractText.take(300)))
+                out.add(
+                    toMap(
+                        heading.ifBlank { query },
+                        abstractUrl.ifBlank { "https://duckduckgo.com/?q=$encoded" },
+                        abstractText.take(300)
+                    )
+                )
             }
             val related = json.optJSONArray("RelatedTopics")
             if (related != null) {
@@ -185,13 +205,19 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             val itemRegex = Regex("<item>(.*?)</item>", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
             val titleRegex = Regex("<title><!\\[CDATA\\[(.*?)]]></title>|<title>(.*?)</title>", RegexOption.IGNORE_CASE)
             val linkRegex = Regex("<link>(.*?)</link>", RegexOption.IGNORE_CASE)
-            val descRegex = Regex("<description><!\\[CDATA\\[(.*?)]]></description>|<description>(.*?)</description>", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
+            val descRegex = Regex(
+                "<description><!\\[CDATA\\[(.*?)]]></description>|<description>(.*?)</description>",
+                setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+            )
             for (match in itemRegex.findAll(xml).take(maxResults)) {
                 val block = match.groupValues[1]
                 val title = titleRegex.find(block)?.let { it.groupValues[1].ifBlank { it.groupValues[2] } }?.trim().orEmpty()
                 val link = linkRegex.find(block)?.groupValues?.get(1)?.trim().orEmpty()
-                val desc = descRegex.find(block)?.let { it.groupValues[1].ifBlank { it.groupValues[2] } }?.replace(Regex("<[^>]+>"), "")?.trim().orEmpty()
-                if (title.isNotBlank() || link.isNotBlank()) out.add(toMap(title, link, desc.take(200)))
+                val desc = descRegex.find(block)?.let { it.groupValues[1].ifBlank { it.groupValues[2] } }
+                    ?.replace(Regex("<[^>]+>"), "")?.trim().orEmpty()
+                if (title.isNotBlank() || link.isNotBlank()) {
+                    out.add(toMap(title, link, desc.take(200)))
+                }
             }
             return out
         }
@@ -209,8 +235,12 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
             val html = response.body?.string() ?: throw Exception("Empty response")
             val results = mutableListOf<Map<String, String>>()
-            val resultRegex = Regex("""class=[\"']result__a[\"']\\s+href=[\"']([^\"']+)[\"'][^>]*>([^<]+)</a>""", RegexOption.DOT_MATCHES_ALL)
-            val snippetRegex = Regex("""class=[\"']result__snippet[\"'][^>]*>([^<]+)</""", RegexOption.DOT_MATCHES_ALL)
+            val resultRegex = Regex(
+                "class=\"result__a\" href=\"([^\"]+)\"[^>]*>([^<]+)</a>"
+            )
+            val snippetRegex = Regex(
+                "class=\"result__snippet\"[^>]*>([^<]+)</"
+            )
             val matches = resultRegex.findAll(html).take(maxResults)
             val snippets = snippetRegex.findAll(html).take(maxResults).map { it.groupValues[1].trim() }.toList()
             matches.forEachIndexed { index, match ->
@@ -229,7 +259,11 @@ class WebSearchTool(private val client: OkHttpClient) : AgentTool {
             val request = Request.Builder().url("https://fa.wikipedia.org").head()
                 .header("User-Agent", "Aria-Android-Assistant/1.0").build()
             client.newCall(request).execute().use { response ->
-                HealthStatus(response.isSuccessful, System.currentTimeMillis() - start, if (response.isSuccessful) "OK" else "HTTP ${response.code}")
+                HealthStatus(
+                    response.isSuccessful,
+                    System.currentTimeMillis() - start,
+                    if (response.isSuccessful) "OK" else "HTTP ${response.code}"
+                )
             }
         } catch (e: Exception) {
             HealthStatus(false, System.currentTimeMillis() - start, e.message ?: "Unknown error")
