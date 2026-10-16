@@ -19,6 +19,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
 import com.mrfokolaii.aria.agent.ModelImportUtil
+import com.mrfokolaii.aria.agent.mcp.McpClient
 import com.mrfokolaii.aria.memory.LocalKnowledgeStore
 import com.mrfokolaii.aria.memory.PersistentMemory
 import java.io.File
@@ -33,6 +34,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var widgetSwitch: Switch
     private lateinit var modelStatusView: TextView
     private lateinit var knowledgeStatusView: TextView
+    private lateinit var mcpSwitch: Switch
+    private lateinit var mcpUrl: EditText
+    private lateinit var mcpStatus: TextView
 
     private val modelPicker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -168,7 +172,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         root.addView(TextView(this).apply {
-            text = "برای GPU: فایل .task (Qwen LiteRT) را آپلود کن. GGUF قبلی هم به‌عنوان CPU کار می‌کند."
+            text = "برای GPU: فایل مدل آفلاین را آپلود کن."
             textSize = 11f
             setTextColor(Color.GRAY)
             setPadding(0, 6, 0, 16)
@@ -265,6 +269,103 @@ class MainActivity : AppCompatActivity() {
         root.addView(ttsRow)
 
         root.addView(TextView(this).apply {
+            text = "۴) MCP (ابزارهای خارجی)"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setPadding(0, 16, 0, 8)
+        })
+        mcpSwitch = Switch(this).apply {
+            text = "فعال‌سازی MCP"
+            setTextColor(Color.WHITE)
+            isChecked = prefs.getBoolean(McpClient.PREF_ENABLED, false)
+        }
+        root.addView(mcpSwitch)
+        mcpUrl = EditText(this).apply {
+            hint = "آدرس سرور MCP (مثلاً https://host/mcp)"
+            setText(prefs.getString(McpClient.PREF_URL, "") ?: "")
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+        }
+        root.addView(mcpUrl)
+        mcpStatus = TextView(this).apply {
+            text = if (prefs.getBoolean(McpClient.PREF_ENABLED, false) &&
+                !(prefs.getString(McpClient.PREF_URL, "").isNullOrBlank())
+            ) "MCP: آماده اتصال" else "MCP: خاموش"
+            textSize = 12f
+            setTextColor(Color.parseColor("#80CBC4"))
+            setPadding(0, 4, 0, 8)
+        }
+        root.addView(mcpStatus)
+        val mcpRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        mcpRow.addView(Button(this).apply {
+            text = "ذخیره MCP"
+            setBackgroundColor(Color.parseColor("#6A1B9A"))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                val enabled = mcpSwitch.isChecked
+                val url = mcpUrl.text.toString().trim()
+                prefs.edit()
+                    .putBoolean(McpClient.PREF_ENABLED, enabled)
+                    .putString(McpClient.PREF_URL, url)
+                    .apply()
+                mcpStatus.text = when {
+                    !enabled -> "MCP: خاموش (ذخیره شد)"
+                    url.isBlank() -> "MCP: آدرس خالی است"
+                    else -> "MCP: ذخیره شد — $url"
+                }
+                mcpStatus.setTextColor(Color.parseColor("#CE93D8"))
+                Toast.makeText(this@MainActivity, "تنظیمات MCP ذخیره شد", Toast.LENGTH_SHORT).show()
+            }
+        })
+        mcpRow.addView(Button(this).apply {
+            text = "تست اتصال"
+            setBackgroundColor(Color.parseColor("#4527A0"))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                val url = mcpUrl.text.toString().trim()
+                if (url.isBlank()) {
+                    Toast.makeText(this@MainActivity, "اول آدرس سرور را بنویس", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                mcpStatus.text = "در حال اتصال…"
+                mcpStatus.setTextColor(Color.parseColor("#FFD54F"))
+                Thread {
+                    try {
+                        val client = McpClient(url)
+                        val ok = kotlinx.coroutines.runBlocking { client.initialize() }
+                        val tools = if (ok) kotlinx.coroutines.runBlocking { client.listTools() } else emptyList()
+                        runOnUiThread {
+                            if (ok) {
+                                mcpStatus.text = "متصل — ${tools.size} ابزار: " +
+                                    tools.take(6).joinToString { it.name }
+                                mcpStatus.setTextColor(Color.parseColor("#00E676"))
+                                Toast.makeText(this@MainActivity, "MCP وصل شد (${tools.size} ابزار)", Toast.LENGTH_LONG).show()
+                            } else {
+                                mcpStatus.text = "اتصال ناموفق"
+                                mcpStatus.setTextColor(Color.parseColor("#FF5252"))
+                                Toast.makeText(this@MainActivity, "اتصال MCP ناموفق", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        runOnUiThread {
+                            mcpStatus.text = "خطا: ${e.message}"
+                            mcpStatus.setTextColor(Color.parseColor("#FF5252"))
+                            Toast.makeText(this@MainActivity, "خطا: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }.start()
+            }
+        })
+        root.addView(mcpRow)
+        root.addView(TextView(this).apply {
+            text = "در چت بگو «لیست mcp» یا نام ابزار مثل mcp_search"
+            textSize = 11f
+            setTextColor(Color.GRAY)
+            setPadding(0, 6, 0, 12)
+        })
+
+        root.addView(TextView(this).apply {
             text = "\nاختیاری — کلید ابری (چت آفلاین به آن نیاز ندارد)"
             textSize = 13f
             setTextColor(Color.GRAY)
@@ -295,7 +396,14 @@ class MainActivity : AppCompatActivity() {
         val e = getSharedPreferences("aria", MODE_PRIVATE).edit()
         if (::groqKey.isInitialized) e.putString("groq_api_key", groqKey.text.toString().trim())
         if (::groqModel.isInitialized) e.putString("groq_model", groqModel.text.toString().trim())
+        if (::mcpSwitch.isInitialized) e.putBoolean(McpClient.PREF_ENABLED, mcpSwitch.isChecked)
+        if (::mcpUrl.isInitialized) e.putString(McpClient.PREF_URL, mcpUrl.text.toString().trim())
         e.apply()
+    }
+
+    override fun onPause() {
+        saveFields()
+        super.onPause()
     }
 
     private fun ensureRunPermissions() {
