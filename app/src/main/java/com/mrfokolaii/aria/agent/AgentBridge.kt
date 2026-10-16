@@ -8,7 +8,7 @@ import com.mrfokolaii.aria.util.NetworkUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Bridge: local tools + offline LLM + knowledge + internet search. */
+/** Bridge: local tools + offline LLM + knowledge + internet search + MCP. */
 class AgentBridge(
     private val context: Context,
     apiKey: String,
@@ -27,6 +27,25 @@ class AgentBridge(
 
         val online = NetworkUtils.isOnline(context)
         val lower = userInput.lowercase().replace("\u200c", "")
+
+        if (online) {
+            try {
+                val n = toolManager.ensureMcpToolsLoaded()
+                if (n > 0) Log.d(TAG, "MCP tools ready: $n")
+            } catch (e: Exception) {
+                Log.w(TAG, "MCP load: ${e.message}")
+            }
+        }
+
+        if (containsAny(lower, "لیست mcp", "ابزار mcp", "mcp tools", "لیست ام سی پی")) {
+            val list = toolManager.listMcpTools()
+            val msg = if (list.isEmpty()) {
+                "ابزار MCP فعال نیست.\nدر SharedPreferences با نام aria بنویس:\nmcp_enabled=true\nmcp_server_url=آدرس سرور MCP"
+            } else {
+                "ابزارهای MCP:\n" + list.joinToString("\n") { "• $it" }
+            }
+            return@withContext AgentResponse(text = msg)
+        }
 
         if (containsAny(lower, "لیست دانش", "فایل دانش", "دانش من", "بروزرسانی دانش")) {
             return@withContext AgentResponse(text = knowledgeStore.statusText())
@@ -48,14 +67,15 @@ class AgentBridge(
                 )
             }
 
-            val statusMsg = when (toolIntent.toolName) {
-                "web_search" -> "🔍 در حال جستجو در اینترنت…"
-                "github_search" -> "🐙 در حال جستجو در گیت‌هاب…"
-                "web_browse" -> "🌐 در حال باز کردن سایت…"
-                "file_download" -> "⬇️ در حال دانلود…"
-                "phone_call" -> "📞 در حال آماده‌سازی تماس…"
-                "sms" -> "💬 در حال آماده‌سازی پیامک…"
-                "app_launcher" -> "📱 در حال باز کردن برنامه…"
+            val statusMsg = when {
+                toolIntent.toolName.startsWith("mcp_") -> "🔌 در حال اجرای ابزار MCP…"
+                toolIntent.toolName == "web_search" -> "🔍 در حال جستجو در اینترنت…"
+                toolIntent.toolName == "github_search" -> "🐙 در حال جستجو در گیت‌هاب…"
+                toolIntent.toolName == "web_browse" -> "🌐 در حال باز کردن سایت…"
+                toolIntent.toolName == "file_download" -> "⬇️ در حال دانلود…"
+                toolIntent.toolName == "phone_call" -> "📞 در حال آماده‌سازی تماس…"
+                toolIntent.toolName == "sms" -> "💬 در حال آماده‌سازی پیامک…"
+                toolIntent.toolName == "app_launcher" -> "📱 در حال باز کردن برنامه…"
                 else -> "⚙️ در حال اجرای ابزار…"
             }
             try { onStatus(statusMsg) } catch (_: Exception) {}
@@ -67,10 +87,14 @@ class AgentBridge(
             }
 
             return@withContext if (toolResult.success) {
-                val reply = when (toolIntent.toolName) {
-                    "web_browse", "app_launcher", "phone_call", "sms", "file_download" ->
+                val reply = when {
+                    toolIntent.toolName.startsWith("mcp_") -> {
+                        val raw = formatToolResult(toolResult)
+                        "🔌 MCP (${toolIntent.toolName}):\n$raw"
+                    }
+                    toolIntent.toolName in listOf("web_browse", "app_launcher", "phone_call", "sms", "file_download") ->
                         offlineToolReply(toolIntent.toolName, toolResult)
-                    "github_search" -> {
+                    toolIntent.toolName == "github_search" -> {
                         val raw = formatToolResult(toolResult)
                         try { onStatus("🧠 نتایج گیت‌هاب آماده — در حال فکر کردن…") } catch (_: Exception) {}
                         val summary = try {
@@ -88,7 +112,7 @@ class AgentBridge(
                             }
                         }
                     }
-                    "web_search" -> {
+                    toolIntent.toolName == "web_search" -> {
                         val raw = offlineToolReply("web_search", toolResult)
                         try { onStatus("🧠 نتایج جستجو آماده — در حال فکر کردن…") } catch (_: Exception) {}
                         val summary = try {
@@ -123,10 +147,13 @@ class AgentBridge(
         AgentResponse(text = text)
     }
 
-    private fun isOnlineOnlyTool(name: String): Boolean = when (name) {
-        "web_search", "file_download", "github_search", "youtube_search",
-        "reddit_search", "rss_reader", "instagram_search", "bilibili_search" -> true
-        else -> false
+    private fun isOnlineOnlyTool(name: String): Boolean {
+        if (name.startsWith("mcp_")) return true
+        return when (name) {
+            "web_search", "file_download", "github_search", "youtube_search",
+            "reddit_search", "rss_reader", "instagram_search", "bilibili_search" -> true
+            else -> false
+        }
     }
 
     private fun formatToolResult(toolResult: ToolResult): String {
@@ -137,13 +164,15 @@ class AgentBridge(
                     is Map<*, *> -> {
                         val title = item["title"] ?: item["name"] ?: ""
                         val url = item["url"] ?: ""
-                        val snip = item["snippet"] ?: item["description"] ?: ""
+                        val snip = item["snippet"] ?: item["description"] ?: item["text"] ?: ""
                         "• $title\n  $url\n  $snip"
                     }
                     else -> item.toString()
                 }
             }
             is Map<*, *> -> {
+                val mcpText = data["text"]
+                if (mcpText != null) return htmlDecode(mcpText.toString())
                 val results = data["results"]
                 if (results is List<*>) {
                     results.take(4).joinToString("\n") { item ->
@@ -192,6 +221,11 @@ class AgentBridge(
             return ToolIntent("github_search", mapOf("action" to "search", "query" to q))
         }
 
+        val mcpMatch = Regex("mcp_[a-zA-Z0-9_\\-]+").find(lower)
+        if (mcpMatch != null) {
+            return ToolIntent(mcpMatch.value, mapOf("query" to extractQuery(input)), useRouter = false)
+        }
+
         if (containsAny(lower, "جستجو", "سرچ", "search", "گوگل کن", "بگرد")) {
             return ToolIntent("web_search", mapOf("query" to extractQuery(input)), useRouter = false)
         }
@@ -221,7 +255,7 @@ class AgentBridge(
         val ask = containsAny(lower, "میتونی", "می‌تونی", "می تونی", "می‌توانی", "میتوانی", "بلدی", "داری")
         val topic = containsAny(
             lower, "صحبت", "حرف بزن", "صدا", "ویس", "جستجو", "سرچ", "اینترنت",
-            "گیتهاب", "گیت‌هاب", "github", "تماس", "پیامک", "اپ", "برنامه"
+            "گیتهاب", "گیت‌هاب", "github", "تماس", "پیامک", "اپ", "برنامه", "mcp"
         )
         return ask && topic
     }
@@ -230,6 +264,8 @@ class AgentBridge(
         return when {
             containsAny(lower, "صحبت", "حرف بزن", "صدا", "ویس") ->
                 "بله، با صدای بلند جواب می‌دم. بگو چی کار برات انجام بدم."
+            containsAny(lower, "mcp") ->
+                "اگر سرور MCP را در تنظیمات فعال کرده باشی، ابزارهایش را لود می‌کنم. بگو «لیست mcp»."
             containsAny(lower, "گیتهاب", "گیت‌هاب", "github") &&
                 containsAny(lower, "اینترنت", "جستجو", "سرچ") ->
                 "بله، هم اینترنت و هم گیت‌هاب را سرچ می‌کنم. موضوع را بگو تا همان را پیدا کنم."
@@ -242,7 +278,7 @@ class AgentBridge(
             containsAny(lower, "پیامک") ->
                 "بله، می‌تونم پیامک آماده کنم. بگو برای کی و چه متنی."
             else ->
-                "بله، سرچ اینترنت و گیت‌هاب، تماس، پیامک، باز کردن اپ و پاسخ صوتی را انجام می‌دم. دستورت را بگو."
+                "بله، سرچ اینترنت و گیت‌هاب، تماس، پیامک، باز کردن اپ، MCP و پاسخ صوتی را انجام می‌دم. دستورت را بگو."
         }
     }
 
