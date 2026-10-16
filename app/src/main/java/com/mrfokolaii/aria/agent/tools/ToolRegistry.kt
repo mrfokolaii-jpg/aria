@@ -18,6 +18,20 @@ class ToolRegistry {
         tools[tool.name] = tool
     }
 
+    fun unregister(name: String) {
+        tools.remove(name)
+        healthCache.remove(name)
+    }
+
+    fun unregisterByPrefix(prefix: String): Int {
+        val keys = tools.keys.filter { it.startsWith(prefix) }
+        keys.forEach {
+            tools.remove(it)
+            healthCache.remove(it)
+        }
+        return keys.size
+    }
+
     fun getTool(name: String): AgentTool? = tools[name]
 
     fun getToolsByCategory(category: ToolCategory): List<AgentTool> =
