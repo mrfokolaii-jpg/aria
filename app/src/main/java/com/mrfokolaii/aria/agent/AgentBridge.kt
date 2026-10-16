@@ -245,13 +245,16 @@ class AgentBridge(
         }
     }
 
-    private fun htmlDecode(s: String): String =
-        s.replace("&", "&")
-            .replace("<", "<")
-            .replace(">", ">")
-            .replace(""", "\"")
-            .replace("&#39;", "'")
-            .replace("&nbsp;", " ")
+    private fun htmlDecode(s: String): String {
+        var t = s
+        t = t.replace("&", "&")
+        t = t.replace("<", "<")
+        t = t.replace(">", ">")
+        t = t.replace(""", "\"")
+        t = t.replace("&#39;", "'")
+        t = t.replace("&nbsp;", " ")
+        return t
+    }
 
     private data class ToolIntent(
         val toolName: String,
