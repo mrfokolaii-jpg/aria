@@ -246,15 +246,15 @@ class AgentBridge(
         }
     }
 
-    // Build HTML entity tags via string concat (API strips literal entities)
     private fun htmlDecode(s: String): String {
+        val e = Char(38).toString()
         var t = s
-        t = t.replace("&" + "amp;", "&")
-        t = t.replace("&" + "lt;", "<")
-        t = t.replace("&" + "gt;", ">")
-        t = t.replace("&" + "quot;", "\"")
-        t = t.replace("&#39;", "'")
-        t = t.replace("&" + "nbsp;", " ")
+        t = t.replace(e + "a" + "mp;", e)
+        t = t.replace(e + "l" + "t;", "<")
+        t = t.replace(e + "g" + "t;", ">")
+        t = t.replace(e + "q" + "uot;", "\"")
+        t = t.replace(e + "#39;", "'")
+        t = t.replace(e + "n" + "bsp;", " ")
         return t
     }
 
