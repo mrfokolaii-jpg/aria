@@ -8,6 +8,7 @@ import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.mrfokolaii.aria.memory.LocalKnowledgeStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -78,55 +79,47 @@ class OfflineLlmEngine(private val context: Context) {
             activeBackend == BackendKind.CPU && f != null ->
                 "موتور: LiteRT-LM CPU\nGemma-4 E4B\n${f.name} (${f.length() / 1_000_000} MB)\n${f.absolutePath}"
             f != null ->
-                "مدل آماده: ${f.name} (${f.length() / 1_000_000} MB)\n${f.absolutePath}\n(هنوز بارگذاری نشده)"
-            lastLoadError != null ->
-                "خطا:\n$lastLoadError\n\nدانلود:\n$MODEL_DOWNLOAD_URL"
-            else ->
-                "مدل Gemma-4 E4B پیدا نشد\nفایل .litertlm را در Download بگذار یا آپلود کن\n\n$MODEL_DOWNLOAD_URL"
+                "مدل پیدا شد (هنوز لود نشده)\n${f.name} (${f.length() / 1_000_000} MB)\n${f.absolutePath}"
+            else -> "مدل نیست.\n$MODEL_DOWNLOAD_URL"
         }
     }
 
-    suspend fun ensureLoaded(): Boolean = withContext(Dispatchers.IO) {
+    private suspend fun ensureLoaded(): Boolean = withContext(Dispatchers.IO) {
+        if (sharedEngine != null) return@withContext true
         loadMutex.withLock {
             if (sharedEngine != null) return@withContext true
-            val model = candidateLitertFiles()
-                .filter { it.exists() && it.length() > 100_000_000L }
-                .maxByOrNull { it.length() }
-            if (model == null) {
-                lastLoadError = "فایل gemma-4-E4B-it.litertlm پیدا نشد"
+            val file = candidateLitertFiles().firstOrNull { it.exists() && it.length() > 100_000_000L }
+            if (file == null) {
+                lastLoadError = "فایل مدل پیدا نشد"
                 return@withContext false
             }
             try {
-                Log.i(TAG, "Loading GPU ${model.absolutePath}")
-                val config = EngineConfig(
-                    modelPath = model.absolutePath,
-                    backend = Backend.GPU(),
-                    cacheDir = context.cacheDir.absolutePath
+                val cfg = EngineConfig(
+                    modelPath = file.absolutePath,
+                    backend = Backend.GPU()
                 )
-                val engine = Engine(config)
-                engine.initialize()
-                sharedEngine = engine
+                val eng = Engine(cfg)
+                eng.initialize()
+                sharedEngine = eng
                 activeBackend = BackendKind.GPU
+                loadedPath = file.absolutePath
                 lastLoadError = null
-                loadedPath = model.absolutePath
-                Log.i(TAG, "Loaded on GPU")
+                Log.i(TAG, "Loaded on GPU: ${file.name}")
                 return@withContext true
             } catch (e: Throwable) {
-                Log.e(TAG, "GPU failed", e)
-                lastLoadError = "GPU: ${e.message}"
+                Log.w(TAG, "GPU load failed, trying CPU", e)
             }
             try {
-                val config = EngineConfig(
-                    modelPath = model.absolutePath,
-                    backend = Backend.CPU(),
-                    cacheDir = context.cacheDir.absolutePath
+                val cfg = EngineConfig(
+                    modelPath = file.absolutePath,
+                    backend = Backend.CPU()
                 )
-                val engine = Engine(config)
-                engine.initialize()
-                sharedEngine = engine
+                val eng = Engine(cfg)
+                eng.initialize()
+                sharedEngine = eng
                 activeBackend = BackendKind.CPU
+                loadedPath = file.absolutePath
                 lastLoadError = null
-                loadedPath = model.absolutePath
                 Log.i(TAG, "Loaded on CPU")
                 return@withContext true
             } catch (e2: Throwable) {
@@ -156,7 +149,15 @@ class OfflineLlmEngine(private val context: Context) {
                 )
                 val conversation = engine.createConversation(config)
                 try {
+                    val knowledge = try {
+                        LocalKnowledgeStore(context).retrieveRelevant(userMessage, 2800)
+                    } catch (_: Exception) { "" }
                     val prompt = buildString {
+                        if (knowledge.isNotBlank()) {
+                            append("دانش مرتبط از حافظه محلی:\n")
+                            append(knowledge.take(2800))
+                            append("\n---\n")
+                        }
                         history.takeLast(4).forEach { (role, content) ->
                             if (role == "user") append("کاربر: ${content.take(180)}\n")
                             else append("آریا: ${content.take(180)}\n")
@@ -204,10 +205,10 @@ class OfflineLlmEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "OfflineLlmEngine"
-        const val MODELS_DIR = "models"
+        private const val MODELS_DIR = "models"
         const val MODEL_FILE_NAME = "gemma-4-E4B-it.litertlm"
         const val MODEL_DOWNLOAD_URL =
-            "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm"
+            "https://huggingface.co/litert-community/Gemma4-E4B-it/resolve/main/model.litertlm"
 
         private val loadMutex = Mutex()
         private val globalCancel = AtomicBoolean(false)
@@ -216,10 +217,9 @@ class OfflineLlmEngine(private val context: Context) {
             private set
         @Volatile var activeBackend: BackendKind = BackendKind.NONE
             private set
-        @Volatile var lastLoadError: String? = null
-            private set
         @Volatile var loadedPath: String? = null
             private set
+        @Volatile var lastLoadError: String? = null
 
         fun unloadAll() {
             try { sharedEngine?.close() } catch (_: Exception) {}
@@ -233,6 +233,7 @@ class OfflineLlmEngine(private val context: Context) {
             "تو آریا هستی، دستیار صوتی هوشمند روی گوشی اندروید. همیشه فارسی کوتاه و مفید جواب بده. " +
                 "هرگز نگو که فقط مدل زبانی هستی یا نمی‌توانی صحبت کنی؛ صدای تو از طریق بلندگوی گوشی پخش می‌شود. " +
                 "هرگز نگو اینترنت یا گیت‌هاب نداری؛ ابزارهای جستجو، تماس، پیامک و باز کردن اپ برایت فعال است. " +
+                "اگر بخشی به نام دانش مرتبط از حافظه محلی آمد، اول از همان برای جواب استفاده کن. " +
                 "سلام بی‌مورد نگو. اگر اطلاعات نداری کوتاه بگو نمی‌دانم. پاسخ‌ها را حداکثر چند جمله نگه دار."
     }
 }
