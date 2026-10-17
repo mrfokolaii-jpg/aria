@@ -28,8 +28,10 @@ import com.mrfokolaii.aria.agent.AgentResponse
 import com.mrfokolaii.aria.agent.UnoRouterProvider
 import com.mrfokolaii.aria.memory.ChatHistoryStore
 import com.mrfokolaii.aria.memory.PersistentMemory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -47,6 +49,8 @@ class ChatActivity : AppCompatActivity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var pendingFileUri: Uri? = null
     private var isSending = false
+    private var sendJob: Job? = null
+    private lateinit var sendButton: Button
     private var shownCount = 0
 
     private val chatUpdatedReceiver = object : BroadcastReceiver() {
@@ -221,12 +225,15 @@ class ChatActivity : AppCompatActivity() {
             }
         }
         inputRow.addView(inputField)
-        inputRow.addView(Button(this).apply {
+        sendButton = Button(this).apply {
             text = "➤"
             setBackgroundColor(Color.parseColor("#00C853"))
             setTextColor(Color.WHITE)
-            setOnClickListener { sendMessage() }
-        })
+            setOnClickListener {
+                if (isSending) stopGeneration() else sendMessage()
+            }
+        }
+        inputRow.addView(sendButton)
         root.addView(inputRow)
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
@@ -272,6 +279,25 @@ class ChatActivity : AppCompatActivity() {
         shownCount = all.size
     }
 
+    private fun setSendingUi(sending: Boolean) {
+        isSending = sending
+        if (!::sendButton.isInitialized) return
+        if (sending) {
+            sendButton.text = "■"
+            sendButton.setBackgroundColor(Color.parseColor("#E53935"))
+        } else {
+            sendButton.text = "➤"
+            sendButton.setBackgroundColor(Color.parseColor("#00C853"))
+        }
+    }
+
+    private fun stopGeneration() {
+        try { agentBridge?.requestStop() } catch (_: Exception) {}
+        sendJob?.cancel()
+        setSendingUi(false)
+        Toast.makeText(this, "متوقف شد", Toast.LENGTH_SHORT).show()
+    }
+
     private fun sendMessage() {
         if (isSending) return
         val text = inputField.text?.toString()?.trim().orEmpty()
@@ -289,34 +315,55 @@ class ChatActivity : AppCompatActivity() {
         inputField.hint = "پیام خود را بنویسید..."
         pendingFileUri = null
 
-        isSending = true
+        setSendingUi(true)
+        try { agentBridge?.clearStop() } catch (_: Exception) {}
         chatStore.append("user", display, "chat")
         addBubble("user", display, "chat")
         shownCount = chatStore.messageCount()
         val thinking = addBubble("assistant", "⏳ در حال آماده‌سازی…", "chat")
 
-        scope.launch {
+        sendJob = scope.launch {
             try {
                 initBridge()
                 val history = chatStore.loadAll().map { it.role to it.text }.takeLast(12)
                 val response = withContext(Dispatchers.IO) {
                     agentBridge?.processWithAgentTools(display, history) { status ->
-                        runOnUiThread { updateBubble(thinking, status) }
+                        runOnUiThread {
+                            if (isSending) updateBubble(thinking, status)
+                        }
                     } ?: AgentResponse("پل ارتباطی آماده نیست.")
                 }
-                chatStore.append("assistant", response.text, "chat")
-                updateBubble(thinking, response.text)
+                val finalText = response.text.ifBlank { "پاسخی نبود." }
+                chatStore.append("assistant", finalText, "chat")
+                updateBubble(thinking, finalText)
+                styleResultBubble(thinking, finalText)
                 shownCount = chatStore.messageCount()
                 response.toolResult?.data?.let { saveKnowledge(it) }
+            } catch (e: CancellationException) {
+                val msg = "⏹ متوقف شد."
+                chatStore.append("assistant", msg, "chat")
+                updateBubble(thinking, msg)
+                shownCount = chatStore.messageCount()
             } catch (e: Exception) {
                 val err = "خطا: ${e.message}"
                 chatStore.append("assistant", err, "chat")
                 updateBubble(thinking, err)
                 shownCount = chatStore.messageCount()
             } finally {
-                isSending = false
+                setSendingUi(false)
             }
         }
+    }
+
+    private fun styleResultBubble(view: TextView, text: String) {
+        val isCard = text.contains("http") ||
+            text.startsWith("🔍") || text.startsWith("🐙") ||
+            text.startsWith("🔌") || text.startsWith("📞") ||
+            text.startsWith("💬") || text.startsWith("📱") ||
+            text.contains("نتایج جستجو") || text.contains("نتایج گیت")
+        if (!isCard) return
+        view.setBackgroundColor(Color.parseColor("#1A237E"))
+        view.setPadding(22, 16, 22, 16)
     }
 
     private fun saveKnowledge(data: Any?) {
