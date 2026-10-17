@@ -205,7 +205,8 @@ class OfflineLlmEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "OfflineLlmEngine"
-        private const val MODELS_DIR = "models"
+        /** Public: used by ModelImportUtil / ModelDownloader */
+        const val MODELS_DIR = "models"
         const val MODEL_FILE_NAME = "gemma-4-E4B-it.litertlm"
         const val MODEL_DOWNLOAD_URL =
             "https://huggingface.co/litert-community/Gemma4-E4B-it/resolve/main/model.litertlm"
