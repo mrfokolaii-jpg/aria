@@ -19,11 +19,21 @@ class AgentBridge(
     private val offlineLlm = OfflineLlmEngine(context)
     private val knowledgeStore = LocalKnowledgeStore(context)
 
+    fun requestStop() {
+        offlineLlm.requestStop()
+    }
+
+    fun clearStop() {
+        offlineLlm.clearStop()
+    }
+
     suspend fun processWithAgentTools(
         userInput: String,
         conversationHistory: List<Pair<String, String>> = emptyList(),
         onStatus: (String) -> Unit = {}
     ): AgentResponse = withContext(Dispatchers.IO) {
+
+        offlineLlm.clearStop()
 
         val online = NetworkUtils.isOnline(context)
         val lower = userInput.lowercase().replace("\u200c", "")
@@ -92,8 +102,16 @@ class AgentBridge(
                         val raw = formatToolResult(toolResult)
                         "🔌 MCP (${toolIntent.toolName}):\n$raw"
                     }
-                    toolIntent.toolName in listOf("web_browse", "app_launcher", "phone_call", "sms", "file_download") ->
-                        offlineToolReply(toolIntent.toolName, toolResult)
+                    toolIntent.toolName in listOf("web_browse", "app_launcher", "phone_call", "sms", "file_download") -> {
+                        val raw = offlineToolReply(toolIntent.toolName, toolResult)
+                        val prefix = when (toolIntent.toolName) {
+                            "phone_call" -> "📞 "
+                            "sms" -> "💬 "
+                            "app_launcher" -> "📱 "
+                            else -> ""
+                        }
+                        prefix + raw
+                    }
                     toolIntent.toolName == "github_search" -> {
                         val raw = formatToolResult(toolResult)
                         try { onStatus("🧠 نتایج گیت‌هاب آماده — در حال فکر کردن…") } catch (_: Exception) {}
@@ -106,7 +124,7 @@ class AgentBridge(
                         buildString {
                             appendLine("🐙 نتایج جستجوی گیت‌هاب:")
                             appendLine(raw.ifBlank { "(نتیجه‌ای نبود)" })
-                            if (summary.isNotBlank()) {
+                            if (summary.isNotBlank() && summary != "متوقف شد.") {
                                 appendLine()
                                 append("💡 ").append(summary.take(400))
                             }
@@ -124,7 +142,7 @@ class AgentBridge(
                         buildString {
                             appendLine("🔍 نتایج جستجوی اینترنت:")
                             appendLine(raw.ifBlank { "(نتیجه‌ای نبود)" })
-                            if (summary.isNotBlank()) {
+                            if (summary.isNotBlank() && summary != "متوقف شد.") {
                                 appendLine()
                                 append("💡 ").append(summary.take(400))
                             }
@@ -171,7 +189,7 @@ class AgentBridge(
                 }
             }
             is Map<*, *> -> {
-                val mcpText = data["text"]
+                val mcpText = data["text"] ?: data["message"]
                 if (mcpText != null) return htmlDecode(mcpText.toString())
                 val results = data["results"]
                 if (results is List<*>) {
@@ -219,6 +237,60 @@ class AgentBridge(
         if (containsAny(lower, "گودو", "godot", "موتور بازی", "unity", "unreal", "flutter", "react native")) {
             val q = extractQuery(input).ifBlank { input.trim() }
             return ToolIntent("github_search", mapOf("action" to "search", "query" to q))
+        }
+
+        if (containsAny(lower, "تماس", "زنگ بزن", "شماره بگیر", "مخاطب", "شماره‌گیر", "شماره گیر")) {
+            if (containsAny(lower, "مخاطبین", "لیست مخاطب", "دفترچه")) {
+                return ToolIntent("phone_call", mapOf("action" to "contacts"), useRouter = false)
+            }
+            if (containsAny(lower, "شماره‌گیر", "شماره گیر", "dialer")) {
+                return ToolIntent("phone_call", mapOf("action" to "dialer"), useRouter = false)
+            }
+            val name = input
+                .replace(Regex("(لطفا|خواهشا)", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("(تماس( بگیر)?|زنگ بزن( به)?|شماره بگیر|با|به|از)", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (name.isNotBlank()) {
+                return ToolIntent(
+                    "phone_call",
+                    mapOf("action" to "call_name", "contact_name" to name),
+                    useRouter = false
+                )
+            }
+            return ToolIntent("phone_call", mapOf("action" to "contacts"), useRouter = false)
+        }
+
+        if (containsAny(lower, "پیامک", "اس ام اس", "اس‌ام‌اس", "sms", "پیام بفرست", "متن بفرست")) {
+            var body = ""
+            val bodyMatch = Regex("[:：]\\s*(.+)\$").find(input)
+            if (bodyMatch != null) body = bodyMatch.groupValues[1].trim()
+            val name = input
+                .replace(Regex("[:：].*\$"), " ")
+                .replace(Regex("(لطفا|خواهشا)", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("(پیامک|اس.?ام.?اس|sms|پیام بفرست|متن بفرست|بفرست|به|برای)", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            val params = mutableMapOf<String, Any>("action" to "compose")
+            if (name.isNotBlank()) params["contact_name"] = name
+            if (body.isNotBlank()) params["message"] = body
+            return ToolIntent("sms", params, useRouter = false)
+        }
+
+        if (containsAny(lower, "باز کن", "بازکن", "اجرا کن", "بازش کن")) {
+            val appName = input
+                .replace(Regex("(لطفا|خواهشا)", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("(را|رو)?\\s*(باز\\s*کن|بازکن|اجرا کن|بازش کن)", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("(اپ|برنامه|اپلیکیشن)", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (appName.isNotBlank() && !containsAny(appName.lowercase(), "سایت", "گیتهاب", "گیت‌هاب", "github")) {
+                return ToolIntent(
+                    "app_launcher",
+                    mapOf("action" to "launch", "app_name" to appName),
+                    useRouter = false
+                )
+            }
         }
 
         val mcpMatch = Regex("mcp_[a-zA-Z0-9_\\-]+").find(lower)
